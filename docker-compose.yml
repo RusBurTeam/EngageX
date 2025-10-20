@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16
+    container_name: engagex_db
+    environment:
+      POSTGRES_USER: engagex
+      POSTGRES_PASSWORD: engagex
+      POSTGRES_DB: engagex
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
