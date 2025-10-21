@@ -3,9 +3,9 @@ services:
     image: postgres:16
     container_name: engagex_db
     environment:
-      POSTGRES_USER: engagex
-      POSTGRES_PASSWORD: engagex
-      POSTGRES_DB: engagex
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
     volumes:
