@@ -199,7 +199,7 @@ async def parse_channel_to_postgres():
         client = TelegramClient('session_name', api_id, api_hash)
         await client.start(phone)
 
-        channel_username = 'durov'  # Можно изменить на любой канал
+        channel_username = 'CryptoBotRu'  # Можно изменить на любой канал
 
         print(f"🔍 Анализируем канал: @{channel_username}")
         channel = await client.get_entity(channel_username)
