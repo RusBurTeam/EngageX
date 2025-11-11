@@ -1,5 +1,4 @@
 aiogram==3.13.1
-discord.py==2.4.0
 pydantic==2.9.2
 python-dotenv==1.0.1
 SQLAlchemy==2.0.36
