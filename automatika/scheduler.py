@@ -37,12 +37,23 @@ def run_analytics():
     except subprocess.CalledProcessError as e:
         log(f"❌ Ошибка аналитики: {e}")
 
+def run_dataset_builder():
+    log("📦 Запуск сборки датасета...")
+    try:
+        subprocess.run(["python", "analytics/dataset_builder.py"], check=True)
+        log("✅ Датасет успешно собран.")
+    except subprocess.CalledProcessError as e:
+        log(f"❌ Ошибка сборки датасета: {e}")
+
 # === Расписание ===
 schedule.every().day.at("03:00").do(run_parser)
 schedule.every().day.at("03:30").do(run_analytics)
+schedule.every().day.at("04:00").do(run_dataset_builder)
 
 log("🕒 Автоматический планировщик EngageX запущен.")
-log("   Парсер в 03:00, аналитика в 03:30.")
+log("   03:00 — парсер")
+log("   03:30 — аналитика")
+log("   04:00 — сборка датасета")
 
 # === Основной цикл ===
 while True:
