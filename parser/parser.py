@@ -137,7 +137,7 @@ class DatabaseManager:
                 )
             ''')
 
-            # Таблица комментариев
+            # Таблица комментариев (сырые)
             await self.connection.execute('''
                 CREATE TABLE IF NOT EXISTS comments (
                     id SERIAL PRIMARY KEY,
@@ -146,6 +146,18 @@ class DatabaseManager:
                     comment_text TEXT NOT NULL,
                     comment_date TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Таблица очищённых комментариев (нормализованный текст для модели)
+            await self.connection.execute('''
+                CREATE TABLE IF NOT EXISTS clean_comments (
+                    id SERIAL PRIMARY KEY,
+                    source_comment_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+                    channel_username VARCHAR(255) NOT NULL,
+                    clean_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(source_comment_id)
                 )
             ''')
 
@@ -216,6 +228,23 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ Ошибка сохранения clean_post: {e}")
 
+    async def save_clean_comment(self, source_comment_id: int, channel_username: str, raw_text: str):
+        """Сохранение очищённого текста комментария (idempotent)"""
+        try:
+            cleaned = clean_text(raw_text)
+            if not cleaned:
+                return
+
+            await self.connection.execute('''
+                INSERT INTO clean_comments (source_comment_id, channel_username, clean_text)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (source_comment_id)
+                DO UPDATE SET clean_text = EXCLUDED.clean_text
+            ''', source_comment_id, channel_username, cleaned)
+
+        except Exception as e:
+            print(f"❌ Ошибка сохранения clean_comment: {e}")
+
     async def save_reactions(self, post_db_id, channel_username, reactions_dict):
         """Сохранение реакций в БД"""
         try:
@@ -230,15 +259,22 @@ class DatabaseManager:
             print(f"❌ Ошибка сохранения реакций: {e}")
 
     async def save_comments(self, post_db_id, channel_username, comments_list):
-        """Сохранение комментариев в БД"""
+        """Сохранение комментариев в БД с последующей очисткой каждого комментария"""
         try:
+            saved = 0
             for comment_text in comments_list:
-                await self.connection.execute('''
+                # вставляем в comments и получаем id записи
+                comment_db_id = await self.connection.fetchval('''
                     INSERT INTO comments (post_id, channel_username, comment_text, comment_date)
                     VALUES ($1, $2, $3, $4)
+                    RETURNING id
                 ''', post_db_id, channel_username, comment_text, datetime.now())
 
-            print(f"💾 Сохранено {len(comments_list)} комментариев")
+                if comment_db_id:
+                    await self.save_clean_comment(comment_db_id, channel_username, comment_text)
+                    saved += 1
+
+            print(f"💾 Сохранено {saved} комментариев (и их очищённых версий при наличии).")
         except Exception as e:
             print(f"❌ Ошибка сохранения комментариев: {e}")
 
@@ -267,7 +303,7 @@ async def parse_channel_to_postgres():
         client = TelegramClient('session_name', api_id, api_hash)
         await client.start(phone)
 
-        channel_username = 'CryptoBotRu'  # TODO: вынести в конфиг
+        channel_username = 'toncoin_rus'  # TODO: вынести в конфиг
         print(f"🔍 Анализируем канал: @{channel_username}")
 
         channel = await client.get_entity(channel_username)
