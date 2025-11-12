@@ -16,3 +16,11 @@ transformers==4.46.1
 torch>=2.2.0
 streamlit==1.39.0
 plotly==5.24.1
+
+peft
+accelerate
+bitsandbytes
+datasets
+safetensors
+huggingface_hub
+evaluate
