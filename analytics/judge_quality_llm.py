@@ -85,7 +85,7 @@ def ensure_model():
 # prompts
 SYSTEM_MSG = (
     "Ты — строгий, беспристрастный модератор и редактор. "
-    "Оцени качество поста для онлайн-сообщества (SaaS/крипто/ИТ): ясность, полезность, вовлечение, токсичность/этика, структура.\n"
+    "Оцени качество поста для онлайн-сообщества (крипто): ясность, полезность, вовлечение, токсичность/этика, структура.\n"
     "ВЕРНИ ТОЛЬКО ОДИН ВАЛИДНЫЙ JSON. НИЧЕГО БОЛЬШЕ.\n"
     "Формат JSON: {\"score\": <0..100>, \"is_good\": <true|false>, \"reasons\": [..], \"labels\": {\"clarity\":..,\"usefulness\":..,\"engagement\":..,\"ethics\":..}}\n"
 )
@@ -560,12 +560,33 @@ RETURNING id;
 
 
 # ------------------- main loop -------------------
+# ------------------- main loop -------------------
+# ------------------- main loop -------------------
+# ------------------- main loop -------------------
 async def main():
     print(f"[{datetime.now().isoformat()}] 🧑‍⚖️ LLM-оценка постов → post_quality")
     ensure_model()
 
     conn = await asyncpg.connect(**DB)
     try:
+        # 🔹 Считаем, сколько новых постов ждут оценки
+        total_planned = await conn.fetchval(
+            """
+            SELECT COUNT(*) 
+            FROM posts p
+            WHERE p.processing_status = 'new'
+              AND NOT EXISTS (
+                  SELECT 1 
+                  FROM post_quality pq 
+                  WHERE pq.post_id = p.id
+              )
+            """
+        )
+        print(
+            f"[{datetime.now().isoformat()}] 📊 Найдено {total_planned} постов в статусе 'new' без оценки. "
+            f"Будем обрабатывать батчами по {JUDGE_BATCH}."
+        )
+
         pid = os.getpid()
         total = 0
         last_reset = datetime.now()
@@ -614,7 +635,6 @@ async def main():
             # build upserts and status changes
             upserts = []
             done_ids = []
-            # we'll collect attempts to bump for bad_json and decide later
             bump_attempts = []
 
             for meta, res, it in zip(metas, judged, inputs):
@@ -631,33 +651,71 @@ async def main():
                     "inference_time_s": res.get("inference_time_s", None)
                 }
 
-                upserts.append((pid_item, ch, float(signals["score"]), bool(signals["is_good"]), json.dumps(signals, ensure_ascii=False)))
+                upserts.append(
+                    (pid_item, ch,
+                     float(signals["score"]),
+                     bool(signals["is_good"]),
+                     json.dumps(signals, ensure_ascii=False))
+                )
 
-                # decide status
                 reasons = signals["reasons"]
-                if reasons and any(r in ("bad_json", "bad_json_fallback", "tokenization_failed_fallback") for r in reasons):
-                    # bump attempt; will either be retried or marked error depending on attempts
+                if reasons and any(
+                    r in ("bad_json", "bad_json_fallback", "tokenization_failed_fallback")
+                    for r in reasons
+                ):
                     bump_attempts.append(pid_item)
                 else:
                     done_ids.append(pid_item)
 
-            # write results
+            # write results to post_quality
             await conn.executemany(UPSERT_SQL, upserts)
 
             # mark done
             if done_ids:
-                await conn.execute("UPDATE posts SET processing_status='done', processing_started_at=NULL, processor_pid=NULL WHERE id = ANY($1::int[])", done_ids)
+                await conn.execute(
+                    """
+                    UPDATE posts 
+                    SET processing_status='done',
+                        processing_started_at=NULL,
+                        processor_pid=NULL
+                    WHERE id = ANY($1::int[])
+                    """,
+                    done_ids,
+                )
 
-            # handle bumped attempts: increment attempts and decide final error or retry
+            # handle bumped attempts
             for bid in bump_attempts:
-                await conn.execute("UPDATE posts SET attempts = COALESCE(attempts,0) + 1 WHERE id = $1", bid)
-                attempts_now = await conn.fetchval("SELECT attempts FROM posts WHERE id = $1", bid)
+                await conn.execute(
+                    "UPDATE posts SET attempts = COALESCE(attempts,0) + 1 WHERE id = $1",
+                    bid,
+                )
+                attempts_now = await conn.fetchval(
+                    "SELECT attempts FROM posts WHERE id = $1",
+                    bid,
+                )
                 if attempts_now >= MAX_ATTEMPTS:
-                    await conn.execute("UPDATE posts SET processing_status='error', processing_started_at=NULL, processor_pid=NULL WHERE id = $1", bid)
+                    await conn.execute(
+                        """
+                        UPDATE posts 
+                        SET processing_status='error',
+                            processing_started_at=NULL,
+                            processor_pid=NULL
+                        WHERE id = $1
+                        """,
+                        bid,
+                    )
                     print(f"[{datetime.now().isoformat()}] Post {bid} -> marked error after {attempts_now} attempts")
                 else:
-                    # put back to queue
-                    await conn.execute("UPDATE posts SET processing_status='new', processing_started_at=NULL, processor_pid=NULL WHERE id = $1", bid)
+                    await conn.execute(
+                        """
+                        UPDATE posts 
+                        SET processing_status='new',
+                            processing_started_at=NULL,
+                            processor_pid=NULL
+                        WHERE id = $1
+                        """,
+                        bid,
+                    )
                     print(f"[{datetime.now().isoformat()}] Post {bid} -> scheduled for retry (attempt {attempts_now})")
 
             total += len(items)
@@ -665,6 +723,7 @@ async def main():
 
     finally:
         await conn.close()
+
 
 if __name__ == "__main__":
     try:

@@ -1,108 +1,138 @@
 # Models/qwen_loader.py
-# Задача: гарантировать наличие модели локально (при необходимости докачать)
-# и отдать готовые tokenizer+model с корректной квантовкой (4/8 бит) без deprecated флагов.
+#
+# Универсальный лоадер Qwen2.5-7B-Instruct:
+# - сначала пытается взять локальную папку модели в проекте
+# - при желании можно переопределить через .env (BASE_MODEL=...)
+# - грузит в 4-битном режиме через BitsAndBytes (оптимально под LoRA)
+# - возвращает (tokenizer, model), как ждут judge_quality_llm и train_lora_writer
 
 from __future__ import annotations
+
 import os
+import pathlib
 from typing import Tuple
-from dotenv import load_dotenv
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-from huggingface_hub import snapshot_download
-
-# ---- ENV / PATHS ----
-BASE_DIR = os.path.dirname(os.path.abspath(os.path.join(__file__, "..")))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-
-MODEL_ID = os.getenv("JUDGE_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-# Папка, куда кладём веса локально (по умолчанию Models/qwen2.5-7b-instruct)
-MODEL_DIR = os.getenv(
-    "JUDGE_MODEL_DIR",
-    os.path.join(BASE_DIR, "Models", "qwen2.5-7b-instruct")
+from dotenv import load_dotenv
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
 )
 
-# 1 = всегда грузить из локальной папки (без сети, если уже скачано)
-MODEL_LOCAL_ONLY = os.getenv("JUDGE_MODEL_LOCAL_ONLY", "0") == "1"
-# 1 = 8-бит (экономия VRAM), 0 = bfloat16/float32
-USE_8BIT = os.getenv("JUDGE_8BIT", "1") == "1"
+try:
+    from transformers import BitsAndBytesConfig
+except Exception:
+    BitsAndBytesConfig = None  # на всякий случай, но для 4bit лучше установить bitsandbytes
 
-def ensure_model_locally() -> str:
-    """
-    Гарантирует, что MODEL_ID скачана в MODEL_DIR (resume докачки).
-    Возвращает локальный путь к папке модели.
-    """
-    os.makedirs(MODEL_DIR, exist_ok=True)
+# ----------------------------------------------------
+# Базовая директория проекта и .env
+# ----------------------------------------------------
 
-    # Если уже есть tokenizer/config или хотя бы один шард — считаем, что модель локально присутствует.
-    has_any = any(
-        os.path.exists(os.path.join(MODEL_DIR, name))
-        for name in ("config.json", "tokenizer.json")
-    ) or any(
-        f.startswith("model-") and f.endswith(".safetensors")
-        for f in os.listdir(MODEL_DIR)
+BASE_DIR = pathlib.Path(__file__).resolve().parents[1]
+ENV_PATH = BASE_DIR / ".env"
+if ENV_PATH.exists():
+    load_dotenv(str(ENV_PATH))
+
+
+def _resolve_model_name() -> str:
+    """
+    Определяем, откуда брать модель:
+
+    1) Если в .env задан BASE_MODEL — используем его как путь/название.
+    2) Иначе, если в проекте есть локальная папка qwen2.5-7b-instruct — берём её.
+    3) Иначе — используем официальный репозиторий на HF: Qwen/Qwen2.5-7B-Instruct.
+    """
+    env_name = os.getenv("BASE_MODEL")
+    if env_name:
+        return env_name
+
+    local_dir = BASE_DIR / "qwen2.5-7b-instruct"
+    if local_dir.exists():
+        return str(local_dir)
+
+    # fallback в интернетный вариант
+    return "Qwen/Qwen2.5-7B-Instruct"
+
+
+def _build_quant_config():
+    """
+    Собираем конфиг для 4-битной загрузки.
+    На 24 ГБ VRAM этого более чем достаточно, плюс остаётся запас под градиенты LoRA.
+    """
+    if BitsAndBytesConfig is None:
+        # Если bitsandbytes не установлен — грузим фулл-precision (может съесть 18–20 ГБ).
+        return None
+
+    compute_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
     )
 
-    if has_any and MODEL_LOCAL_ONLY:
-        return MODEL_DIR
-
-    if not has_any:
-        # Первая загрузка или чистая папка — делаем snapshot_download в MODEL_DIR.
-        snapshot_download(
-            repo_id=MODEL_ID,
-            local_dir=MODEL_DIR,
-            local_dir_use_symlinks=False,  # чтобы всё лежало реально в MODEL_DIR
-            resume_download=True,
-            max_workers=4,                 # умеренный параллелизм
-        )
-    else:
-        # Додокачка на случай прерванных шардов
-        snapshot_download(
-            repo_id=MODEL_ID,
-            local_dir=MODEL_DIR,
-            local_dir_use_symlinks=False,
-            resume_download=True,
-            max_workers=4,
-        )
-
-    return MODEL_DIR
 
 def load_tokenizer_model() -> Tuple[AutoTokenizer, AutoModelForCausalLM]:
     """
-    Возвращает (tokenizer, model) из локальной папки MODEL_DIR.
-    Корректно настраивает 8-бит/16-бит через BitsAndBytesConfig.
+    Главный хелпер, который вызывают judge_quality_llm и train_lora_writer.
+
+    Возвращает:
+        tokenizer, model
     """
-    local_path = ensure_model_locally()
+    model_name = _resolve_model_name()
+    print(f"[qwen_loader] ⚙️  BASE_MODEL = {model_name}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    quant_config = _build_quant_config()
 
-    quant_cfg = None
-    if device == "cuda" and USE_8BIT:
-        quant_cfg = BitsAndBytesConfig(load_in_8bit=True)
-    elif device == "cuda":
-        quant_cfg = BitsAndBytesConfig(load_in_4bit=False)  # явное отключение 4бит
+    # --- токенайзер ---
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+    )
 
-    tok = AutoTokenizer.from_pretrained(local_path, use_fast=True, local_files_only=True)
+    # нормализуем пад-токен, чтобы не было предупреждений
+    if tokenizer.pad_token_id is None:
+        # у Qwen часто eos и есть нормальный вариант пад-токена
+        tokenizer.pad_token = tokenizer.eos_token
 
-    if quant_cfg is not None:
-        model = AutoModelForCausalLM.from_pretrained(
-            local_path,
-            quantization_config=quant_cfg,
-            device_map="auto",
-            local_files_only=True,
-        ).eval()
+    tokenizer.padding_side = "left"
+
+    # --- модель ---
+    model_kwargs = dict(
+        trust_remote_code=True,
+        device_map="auto",
+    )
+
+    if quant_config is not None:
+        # 4-битный режим через BitsAndBytes (рекомендуется для LoRA)
+        model_kwargs["quantization_config"] = quant_config
     else:
-        model = AutoModelForCausalLM.from_pretrained(
-            local_path,
-            torch_dtype=dtype,
-            device_map="auto" if device == "cuda" else None,
-            local_files_only=True,
-        ).eval()
+        # без квантования — лучше сразу в bfloat16/fp16, иначе будет жирный fp32
+        if torch.cuda.is_available():
+            model_kwargs["torch_dtype"] = torch.bfloat16
 
-    return tok, model
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        **model_kwargs,
+    )
+
+    return tokenizer, model
 
 if __name__ == "__main__":
-    # Быстрый самотест загрузки
-    tok, mdl = load_tokenizer_model()
-    print(f"✅ Модель готова: {MODEL_ID} в {MODEL_DIR}")
+    # Простой самотест: грузим модель и выводим инфу
+    from datetime import datetime
+
+    print(f"[{datetime.now().isoformat()}] 🔍 Тестовый запуск qwen_loader")
+    tokenizer, model = load_tokenizer_model()
+
+    try:
+        device = model.device
+    except Exception:
+        params = list(model.parameters())
+        device = params[0].device if params else "cpu"
+
+    print(f"[{datetime.now().isoformat()}] ✅ Модель загружена")
+    print(f"  • device: {device}")
+    print(f"  • pad_token_id: {tokenizer.pad_token_id}")
+    print(f"  • vocab_size: {model.config.vocab_size}")
