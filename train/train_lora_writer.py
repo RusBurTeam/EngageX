@@ -1,6 +1,7 @@
 # train/train_lora_writer.py
 # Обучение LoRA для "писателя" на Qwen2.5-7B-Instruct
-# по датасету writer_sft_dataset*.jsonl (формат: {"messages": [...]})
+# по объединённому датасету writer_sft_dataset_posts.jsonl
+# (внутри и посты, и челленджи; формат: {"messages": [...]})
 
 import os
 import sys
@@ -28,13 +29,13 @@ if BASE_DIR not in sys.path:
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # ======== Путь к датасету ========
-# 1) WRITER_DATASET_PATH (как у тебя в .env)
+# 1) WRITER_DATASET_PATH (в .env)
 # 2) WRITER_DATA_PATH (старое имя, на всякий случай)
-# 3) дефолт в ./data
+# 3) дефолт — объединённый датасет постов + челленджей
 DATA_PATH = (
     os.getenv("WRITER_DATASET_PATH")
     or os.getenv("WRITER_DATA_PATH")
-    or os.path.join(BASE_DIR, "data", "writer_sft_dataset.jsonl")
+    or os.path.join(BASE_DIR, "data", "writer_train.jsonl")
 )
 
 # ======== Путь к локальной модели Qwen ========
@@ -59,18 +60,22 @@ if not os.path.exists(DATA_PATH):
     raise FileNotFoundError(f"Не найден датасет: {DATA_PATH}")
 
 # ================== ЗАГРУЗАЕМ ДАТАСЕТ ==================
-# Структура:
+# Структура каждой строки:
 # {
 #   "messages": [
 #     {"role": "system", "content": "..."},
-#     {"role": "user", "content": "..."},
-#     {"role": "assistant", "content": "..."}
+#     {"role": "user", "content": "Канал: ... Цель недели: ... Цель: ... Фактура ..."},
+#     {"role": "assistant", "content": "... финальный пост / челлендж ..."}
 #   ]
 # }
+print(f"[{datetime.now().isoformat()}] 📂 Загружаем датасет...")
 raw_dataset = load_dataset(
     "json",
     data_files={"train": DATA_PATH},
 )
+
+train_len = len(raw_dataset["train"])
+print(f"[{datetime.now().isoformat()}] 📊 Размер train-части: {train_len} сэмплов\n")
 
 # ================== ЗАГРУЗКА ТОКЕНАЙЗЕРА И МОДЕЛИ ==================
 print(f"[{datetime.now().isoformat()}] 🔄 Загружаем токенайзер и модель...")
@@ -82,6 +87,8 @@ tokenizer = AutoTokenizer.from_pretrained(
 
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
+
+pad_id = tokenizer.pad_token_id
 
 quant_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -98,6 +105,10 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 model = prepare_model_for_kbit_training(model)
+
+# Немного конфигурации
+model.config.pad_token_id = pad_id
+model.config.use_cache = False  # чтобы Trainer не ругался, нормально для тренировки
 
 # ================== LoRA ==================
 lora_config = LoraConfig(
@@ -121,11 +132,13 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 # ================== ТОКЕНИЗАЦИЯ ==================
+# Полноценный режим: длина контекста 1024 по умолчанию (можно переопределить в .env через WRITER_MAX_LEN)
 MAX_LEN = int(os.getenv("WRITER_MAX_LEN", "1024"))
 
 def tokenize_fn(example: Dict[str, Any]) -> Dict[str, Any]:
     messages = example["messages"]
 
+    # В messages уже зашита система, промпт (с Цель / Цель недели / Фактура) и ответ
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -140,9 +153,11 @@ def tokenize_fn(example: Dict[str, Any]) -> Dict[str, Any]:
         return_attention_mask=True,
     )
 
+    # Классический SFT: предсказываем весь текст целиком
     enc["labels"] = enc["input_ids"].copy()
     return enc
 
+print(f"[{datetime.now().isoformat()}] ✂️ Токенизируем датасет...")
 tokenized = raw_dataset.map(
     tokenize_fn,
     batched=False,
@@ -174,6 +189,7 @@ trainer = Trainer(
 )
 
 if __name__ == "__main__":
+    print(f"[{datetime.now().isoformat()}] 🚀 Старт полноценного обучения LoRA...")
     trainer.train()
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)

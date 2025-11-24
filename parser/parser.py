@@ -103,9 +103,13 @@ class DatabaseManager:
             print("🔌 Соединение с PostgreSQL закрыто")
 
     async def init_database(self):
-        """Инициализация таблиц в БД (ядро проекта + ingest_status)."""
+        """
+        Инициализация таблиц в БД.
+        Создаём только реально используемые поля,
+        без processing_status / attempts / processor_pid.
+        """
         try:
-            # Базовое создание таблиц
+            # posts — только факт поста + ingest_status
             await self.connection.execute('''
                 CREATE TABLE IF NOT EXISTS posts (
                     id SERIAL PRIMARY KEY,
@@ -115,10 +119,6 @@ class DatabaseManager:
                     post_text TEXT,
                     views INTEGER DEFAULT 0,
                     forwards INTEGER DEFAULT 0,
-                    processing_status VARCHAR(32) NOT NULL DEFAULT 'new',
-                    processor_pid INTEGER,
-                    processing_started_at TIMESTAMP,
-                    attempts INTEGER DEFAULT 0,
                     ingest_status VARCHAR(16) NOT NULL DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(channel_username, post_id)
@@ -158,6 +158,7 @@ class DatabaseManager:
                 )
             ''')
 
+
             await self.connection.execute('''
                 CREATE TABLE IF NOT EXISTS post_quality (
                     post_id INTEGER PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
@@ -165,17 +166,12 @@ class DatabaseManager:
                     quality_score NUMERIC,
                     is_good BOOLEAN,
                     signals JSONB,
+                    gen_status VARCHAR(32) NOT NULL DEFAULT 'ok',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
-            # Мягкая миграция: добавить колонку ingest_status, если таблица уже существовала
-            await self.connection.execute('''
-                ALTER TABLE posts
-                ADD COLUMN IF NOT EXISTS ingest_status VARCHAR(16) NOT NULL DEFAULT 'pending'
-            ''')
-
-            print("✅ Таблицы в PostgreSQL инициализированы (ядро проекта + ingest_status)")
+            print("✅ Таблицы в PostgreSQL инициализированы (без лишних колонок в posts)")
 
         except Exception as e:
             print(f"❌ Ошибка инициализации БД: {e}")

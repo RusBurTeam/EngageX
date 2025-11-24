@@ -62,6 +62,7 @@ MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "512"))
 _tokenizer = None
 _model = None
 
+
 def ensure_model():
     global _tokenizer, _model
     if _tokenizer is None or _model is None:
@@ -82,6 +83,7 @@ def ensure_model():
             except Exception as e:
                 warnings.warn(f"Could not add pad_token to tokenizer: {e}")
 
+
 # prompts
 SYSTEM_MSG = (
     "Ты — строгий, беспристрастный модератор и редактор. "
@@ -97,6 +99,7 @@ PROMPT_USER_TEMPLATE = (
     "Верни ТОЛЬКО JSON в указанном формате."
 )
 
+
 def build_messages(text: str, post_id: int, channel: str, metrics: Dict[str, Any]):
     m = PROMPT_USER_TEMPLATE.format(
         post_id=post_id,
@@ -106,12 +109,13 @@ def build_messages(text: str, post_id: int, channel: str, metrics: Dict[str, Any
         reactions=metrics.get("reactions_sum", 0),
         comments=metrics.get("comments_count", 0),
         engagement_rate=metrics.get("engagement_rate", 0.0),
-        post=text[:16000]
+        post=text[:16000],
     )
     return [
         {"role": "system", "content": SYSTEM_MSG},
-        {"role": "user", "content": m}
+        {"role": "user", "content": m},
     ]
+
 
 # ------------------- tokenization normalization -------------------
 def _normalize_input_bundle(input_bundle):
@@ -138,6 +142,7 @@ def _normalize_input_bundle(input_bundle):
         pass
     raise RuntimeError(f"Unsupported tokenizer return type: {type(input_bundle)}")
 
+
 def _to_device_and_prepare(input_dict, device):
     new = {}
     for k, v in input_dict.items():
@@ -154,6 +159,7 @@ def _to_device_and_prepare(input_dict, device):
         new["attention_mask"] = torch.ones_like(new["input_ids"], dtype=torch.long, device=device)
     return new
 
+
 def _supports_generation_config():
     try:
         sig = inspect.signature(_model.generate)
@@ -161,10 +167,11 @@ def _supports_generation_config():
     except Exception:
         return False
 
+
 # ------------------- JSON extract & repair -------------------
 def try_find_json_with_decoder(text: str):
     decoder = json.JSONDecoder()
-    for m in re.finditer(r'\{', text):
+    for m in re.finditer(r"\{", text):
         start = m.start()
         try:
             obj, idx = decoder.raw_decode(text[start:])
@@ -173,34 +180,42 @@ def try_find_json_with_decoder(text: str):
             continue
     return None
 
+
 def repair_json_text(gen_text: str):
     s = gen_text
     # remove fenced code blocks
-    s = re.sub(r'```.*?```', ' ', s, flags=re.S)
-    s = s.replace('`', ' ')
+    s = re.sub(r"```.*?```", " ", s, flags=re.S)
+    s = s.replace("`", " ")
     # smart quotes -> normal
-    s = s.replace('“', '"').replace('”', '"').replace('«', '"').replace('»', '"').replace("’", "'")
+    s = (
+        s.replace("“", '"')
+        .replace("”", '"')
+        .replace("«", '"')
+        .replace("»", '"')
+        .replace("’", "'")
+    )
     # remove control chars
-    s = re.sub(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]', '', s)
+    s = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]", "", s)
     # try to find JSON-like chunks
-    for m in re.finditer(r'\{', s):
+    for m in re.finditer(r"\{", s):
         start = m.start()
         chunk = s[start:]
         # attempt to close at last brace
-        last = chunk.rfind('}')
+        last = chunk.rfind("}")
         if last != -1:
-            candidate = chunk[:last+1]
+            candidate = chunk[: last + 1]
         else:
             candidate = chunk
-        candidate = candidate.replace('\n', ' ')
-        candidate = re.sub(r',\s*}', '}', candidate)
-        candidate = re.sub(r',\s*\]', ']', candidate)
-        candidate = re.sub(r'\s+', ' ', candidate).strip()
+        candidate = candidate.replace("\n", " ")
+        candidate = re.sub(r",\s*}", "}", candidate)
+        candidate = re.sub(r",\s*\]", "]", candidate)
+        candidate = re.sub(r"\s+", " ", candidate).strip()
         try:
             return json.loads(candidate)
         except Exception:
             continue
     return None
+
 
 def extract_or_recover_json(gen_text: str):
     parsed = try_find_json_with_decoder(gen_text)
@@ -210,6 +225,7 @@ def extract_or_recover_json(gen_text: str):
     if repaired is not None:
         return repaired
     return None
+
 
 # ------------------- fallback heuristic -------------------
 def heuristic_fallback_score(metrics: Dict[str, Any]) -> int:
@@ -223,15 +239,26 @@ def heuristic_fallback_score(metrics: Dict[str, Any]) -> int:
         return 10
     return 35
 
+
 # ------------------- secondary extraction using model -------------------
 def extract_with_model(raw_output: str):
     # secondary prompt: ask the model to return a JSON only
     prompt = [
-        {"role": "system", "content": "Ты — помощник. Извлеки один корректный JSON-объект из данного текста. Ничего кроме JSON."},
-        {"role": "user", "content": "Текст:\n\"\"\"\n" + raw_output[:16000] + "\n\"\"\"\n\nВерни ОДИН JSON."}
+        {
+            "role": "system",
+            "content": "Ты — помощник. Извлеки один корректный JSON-объект из данного текста. Ничего кроме JSON.",
+        },
+        {
+            "role": "user",
+            "content": "Текст:\n\"\"\"\n"
+            + raw_output[:16000]
+            + "\n\"\"\"\n\nВерни ОДИН JSON.",
+        },
     ]
     try:
-        inb = _tokenizer.apply_chat_template(prompt, add_generation_prompt=False, return_tensors="pt")
+        inb = _tokenizer.apply_chat_template(
+            prompt, add_generation_prompt=False, return_tensors="pt"
+        )
     except TypeError:
         inb = _tokenizer.apply_chat_template(prompt, return_tensors="pt")
     normalized = _normalize_input_bundle(inb)
@@ -253,6 +280,7 @@ def extract_with_model(raw_output: str):
         return extract_or_recover_json(gen_text)
     except Exception:
         return None
+
 
 # ------------------- inference over items -------------------
 def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -279,16 +307,22 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # progress print
         now = time.time()
         if last_time:
-            avg = (now - last_time)
+            avg = now - last_time
         else:
             avg = 0.0
         last_time = now
-        print(f"[{datetime.now().isoformat()}] LLM infer: {i}/{total} post_id={post_id} avg_last={avg:.2f}s", end="\r", flush=True)
+        print(
+            f"[{datetime.now().isoformat()}] LLM infer: {i}/{total} post_id={post_id} avg_last={avg:.2f}s",
+            end="\r",
+            flush=True,
+        )
 
         messages = build_messages(text, post_id, channel, metrics)
         # tokenization
         try:
-            inb = _tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
+            inb = _tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, return_tensors="pt"
+            )
         except TypeError:
             inb = _tokenizer.apply_chat_template(messages, return_tensors="pt")
 
@@ -299,14 +333,21 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             warnings.warn(f"Tokenization failed for post {post_id}: {e}")
             # fallback heuristic
             fb = heuristic_fallback_score(metrics)
-            results.append({
-                "score": fb,
-                "is_good": fb >= 50,
-                "reasons": ["tokenization_failed_fallback"],
-                "labels": {"clarity":0,"usefulness":0,"engagement":0,"ethics":0},
-                "raw_output": "",
-                "inference_time_s": 0.0
-            })
+            results.append(
+                {
+                    "score": fb,
+                    "is_good": fb >= 50,
+                    "reasons": ["tokenization_failed_fallback"],
+                    "labels": {
+                        "clarity": 0,
+                        "usefulness": 0,
+                        "engagement": 0,
+                        "ethics": 0,
+                    },
+                    "raw_output": "",
+                    "inference_time_s": 0.0,
+                }
+            )
             continue
 
         gen_kwargs = dict(
@@ -322,7 +363,13 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             temp = float(os.getenv("SAMPLE_TEMPERATURE", 0.7))
             top_p = float(os.getenv("SAMPLE_TOP_P", 0.9))
             top_k = int(os.getenv("SAMPLE_TOP_K", 50))
-            gen_cfg = GenerationConfig(max_new_tokens=MAX_NEW_TOKENS, do_sample=True, temperature=temp, top_p=top_p, top_k=top_k)
+            gen_cfg = GenerationConfig(
+                max_new_tokens=MAX_NEW_TOKENS,
+                do_sample=True,
+                temperature=temp,
+                top_p=top_p,
+                top_k=top_k,
+            )
             gen_kwargs = {
                 "input_ids": input_dict["input_ids"],
                 "attention_mask": input_dict["attention_mask"],
@@ -350,26 +397,40 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             except Exception as e2:
                 warnings.warn(f"generate failed for post {post_id}: {e2}")
                 fb = heuristic_fallback_score(metrics)
-                results.append({
-                    "score": fb,
-                    "is_good": fb >= 50,
-                    "reasons": ["generation_failed_fallback"],
-                    "labels": {"clarity":0,"usefulness":0,"engagement":0,"ethics":0},
-                    "raw_output": "",
-                    "inference_time_s": 0.0
-                })
+                results.append(
+                    {
+                        "score": fb,
+                        "is_good": fb >= 50,
+                        "reasons": ["generation_failed_fallback"],
+                        "labels": {
+                            "clarity": 0,
+                            "usefulness": 0,
+                            "engagement": 0,
+                            "ethics": 0,
+                        },
+                        "raw_output": "",
+                        "inference_time_s": 0.0,
+                    }
+                )
                 continue
         except Exception as e:
             warnings.warn(f"Generation exception for post {post_id}: {e}")
             fb = heuristic_fallback_score(metrics)
-            results.append({
-                "score": fb,
-                "is_good": fb >= 50,
-                "reasons": ["generation_exception_fallback"],
-                "labels": {"clarity":0,"usefulness":0,"engagement":0,"ethics":0},
-                "raw_output": "",
-                "inference_time_s": 0.0
-            })
+            results.append(
+                {
+                    "score": fb,
+                    "is_good": fb >= 50,
+                    "reasons": ["generation_exception_fallback"],
+                    "labels": {
+                        "clarity": 0,
+                        "usefulness": 0,
+                        "engagement": 0,
+                        "ethics": 0,
+                    },
+                    "raw_output": "",
+                    "inference_time_s": 0.0,
+                }
+            )
             continue
         t1 = time.time()
         inference_time = t1 - t0
@@ -400,14 +461,21 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if js is None:
             # fallback heuristic
             fb = heuristic_fallback_score(metrics)
-            results.append({
-                "score": fb,
-                "is_good": fb >= 50,
-                "reasons": ["bad_json_fallback"],
-                "labels": {"clarity":0,"usefulness":0,"engagement":0,"ethics":0},
-                "raw_output": (raw_out[:2000] if raw_out else ""),
-                "inference_time_s": inference_time
-            })
+            results.append(
+                {
+                    "score": fb,
+                    "is_good": fb >= 50,
+                    "reasons": ["bad_json_fallback"],
+                    "labels": {
+                        "clarity": 0,
+                        "usefulness": 0,
+                        "engagement": 0,
+                        "ethics": 0,
+                    },
+                    "raw_output": (raw_out[:2000] if raw_out else ""),
+                    "inference_time_s": inference_time,
+                }
+            )
             continue
 
         # parse js fields
@@ -427,7 +495,7 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "ethics": float(labels.get("ethics", 0)),
                 },
                 "raw_output": (raw_out[:2000] if raw_out else ""),
-                "inference_time_s": inference_time
+                "inference_time_s": inference_time,
             }
             if reason_tag:
                 entry["reasons"].append(reason_tag)
@@ -435,14 +503,21 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         except Exception as e:
             warnings.warn(f"Failed to parse js for post {post_id}: {e}")
             fb = heuristic_fallback_score(metrics)
-            results.append({
-                "score": fb,
-                "is_good": fb >= 50,
-                "reasons": ["bad_json_parse_fallback"],
-                "labels": {"clarity":0,"usefulness":0,"engagement":0,"ethics":0},
-                "raw_output": (raw_out[:2000] if raw_out else ""),
-                "inference_time_s": inference_time
-            })
+            results.append(
+                {
+                    "score": fb,
+                    "is_good": fb >= 50,
+                    "reasons": ["bad_json_parse_fallback"],
+                    "labels": {
+                        "clarity": 0,
+                        "usefulness": 0,
+                        "engagement": 0,
+                        "ethics": 0,
+                    },
+                    "raw_output": (raw_out[:2000] if raw_out else ""),
+                    "inference_time_s": inference_time,
+                }
+            )
             continue
 
     # end loop
@@ -453,11 +528,14 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             d = _model.device
             used = torch.cuda.memory_allocated(d) / 1024**2
             reserved = torch.cuda.memory_reserved(d) / 1024**2
-            print(f"[{datetime.now().isoformat()}] GPU: {d} used={used:.0f}MiB reserved={reserved:.0f}MiB")
+            print(
+                f"[{datetime.now().isoformat()}] GPU: {d} used={used:.0f}MiB reserved={reserved:.0f}MiB"
+            )
     except Exception:
         pass
 
     return results
+
 
 # ------------------- DB helpers for atomic batches -------------------
 async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
@@ -474,7 +552,7 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
         "  AND NOT EXISTS (SELECT 1 FROM post_quality pq WHERE pq.post_id = p.id) "
         "ORDER BY p.id "
         "LIMIT $1 FOR UPDATE SKIP LOCKED",
-        batch
+        batch,
     )
     if not rows:
         return []
@@ -484,7 +562,8 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
     # Step 2: mark as processing
     await conn.execute(
         "UPDATE posts SET processing_status='processing', processor_pid=$1, processing_started_at=now() WHERE id = ANY($2::int[])",
-        pid, ids
+        pid,
+        ids,
     )
 
     # Step 3: collect details for those ids
@@ -504,7 +583,7 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
     reactions = {}
     rows_r = await conn.fetch(
         "SELECT post_id, SUM(reaction_count) AS reactions_sum FROM reactions WHERE post_id = ANY($1::int[]) GROUP BY post_id",
-        ids
+        ids,
     )
     for r in rows_r:
         reactions[r["post_id"]] = int(r["reactions_sum"] or 0)
@@ -512,7 +591,7 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
     comments = {}
     rows_c = await conn.fetch(
         "SELECT post_id, COUNT(*) AS comments_count FROM comments WHERE post_id = ANY($1::int[]) GROUP BY post_id",
-        ids
+        ids,
     )
     for r in rows_c:
         comments[r["post_id"]] = int(r["comments_count"] or 0)
@@ -525,27 +604,42 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
         forwards = int(r["forwards"] or 0)
         reactions_sum = reactions.get(pid_row, 0)
         comments_count = comments.get(pid_row, 0)
-        engagement_rate = (reactions_sum + comments_count) / max(1, views) if views > 0 else 0.0
-        result.append({
-            "id": pid_row,
-            "channel_username": r["channel_username"],
-            "text": (r["text"] or "").strip() or " ",
-            "views": views,
-            "forwards": forwards,
-            "reactions_sum": reactions_sum,
-            "comments_count": comments_count,
-            "engagement_rate": round(engagement_rate, 6)
-        })
+        engagement_rate = (
+            (reactions_sum + comments_count) / max(1, views) if views > 0 else 0.0
+        )
+        result.append(
+            {
+                "id": pid_row,
+                "channel_username": r["channel_username"],
+                "text": (r["text"] or "").strip() or " ",
+                "views": views,
+                "forwards": forwards,
+                "reactions_sum": reactions_sum,
+                "comments_count": comments_count,
+                "engagement_rate": round(engagement_rate, 6),
+            }
+        )
     return result
 
+
 # UPSERT for results
+# ВАЖНО: есть колонка gen_status (VARCHAR(32)), которую код явно проставляет.
 UPSERT_SQL = """
-INSERT INTO post_quality (post_id, channel_username, quality_score, is_good, signals, updated_at)
-VALUES ($1, $2, $3, $4, $5::jsonb, now())
+INSERT INTO post_quality (
+    post_id,
+    channel_username,
+    quality_score,
+    is_good,
+    signals,
+    gen_status,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5::jsonb, $6, now())
 ON CONFLICT (post_id) DO UPDATE
 SET quality_score = EXCLUDED.quality_score,
     is_good       = EXCLUDED.is_good,
     signals       = EXCLUDED.signals,
+    gen_status    = EXCLUDED.gen_status,
     updated_at    = now();
 """
 
@@ -559,9 +653,6 @@ RETURNING id;
 """
 
 
-# ------------------- main loop -------------------
-# ------------------- main loop -------------------
-# ------------------- main loop -------------------
 # ------------------- main loop -------------------
 async def main():
     print(f"[{datetime.now().isoformat()}] 🧑‍⚖️ LLM-оценка постов → post_quality")
@@ -596,7 +687,9 @@ async def main():
             if (datetime.now() - last_reset).total_seconds() > 600:
                 rows = await conn.fetch(RESET_STUCK_SQL, PROCESSING_TIMEOUT_MINUTES)
                 if rows:
-                    print(f"[{datetime.now().isoformat()}] Reset {len(rows)} stuck posts -> 'new'")
+                    print(
+                        f"[{datetime.now().isoformat()}] Reset {len(rows)} stuck posts -> 'new'"
+                    )
                 last_reset = datetime.now()
 
             # atomic fetch + mark
@@ -607,7 +700,9 @@ async def main():
                 print(f"[{datetime.now().isoformat()}] Нет новых постов для обработки. Выход.")
                 break
 
-            print(f"[{datetime.now().isoformat()}] -> fetched rows: {len(items)}; GPU status check...")
+            print(
+                f"[{datetime.now().isoformat()}] -> fetched rows: {len(items)}; GPU status check..."
+            )
 
             # prepare inputs for infer
             inputs = []
@@ -618,18 +713,22 @@ async def main():
                     "forwards": row["forwards"],
                     "reactions_sum": row["reactions_sum"],
                     "comments_count": row["comments_count"],
-                    "engagement_rate": row["engagement_rate"]
+                    "engagement_rate": row["engagement_rate"],
                 }
-                inputs.append({
-                    "post_id": row["id"],
-                    "channel": row["channel_username"],
-                    "text": row["text"],
-                    "metrics": metrics
-                })
+                inputs.append(
+                    {
+                        "post_id": row["id"],
+                        "channel": row["channel_username"],
+                        "text": row["text"],
+                        "metrics": metrics,
+                    }
+                )
                 metas.append((row["id"], row["channel_username"]))
 
             # call inference
-            print(f"[{datetime.now().isoformat()}] Calling infer_batch for {len(inputs)} items ...")
+            print(
+                f"[{datetime.now().isoformat()}] Calling infer_batch for {len(inputs)} items ..."
+            )
             judged = infer_batch(inputs)
 
             # build upserts and status changes
@@ -648,14 +747,21 @@ async def main():
                     "labels": res.get("labels", {}),
                     "metrics": it["metrics"],
                     "raw_output": res.get("raw_output", "")[:2000],
-                    "inference_time_s": res.get("inference_time_s", None)
+                    "inference_time_s": res.get("inference_time_s", None),
                 }
 
+                # Пока по договорённости: всегда ставим gen_status = 'ok'
+                gen_status = "ok"
+
                 upserts.append(
-                    (pid_item, ch,
-                     float(signals["score"]),
-                     bool(signals["is_good"]),
-                     json.dumps(signals, ensure_ascii=False))
+                    (
+                        pid_item,
+                        ch,
+                        float(signals["score"]),
+                        bool(signals["is_good"]),
+                        json.dumps(signals, ensure_ascii=False),
+                        gen_status,
+                    )
                 )
 
                 reasons = signals["reasons"]
@@ -704,7 +810,9 @@ async def main():
                         """,
                         bid,
                     )
-                    print(f"[{datetime.now().isoformat()}] Post {bid} -> marked error after {attempts_now} attempts")
+                    print(
+                        f"[{datetime.now().isoformat()}] Post {bid} -> marked error after {attempts_now} attempts"
+                    )
                 else:
                     await conn.execute(
                         """
@@ -716,7 +824,9 @@ async def main():
                         """,
                         bid,
                     )
-                    print(f"[{datetime.now().isoformat()}] Post {bid} -> scheduled for retry (attempt {attempts_now})")
+                    print(
+                        f"[{datetime.now().isoformat()}] Post {bid} -> scheduled for retry (attempt {attempts_now})"
+                    )
 
             total += len(items)
             print(f"[{datetime.now().isoformat()}]  ✓ +{len(items)} (итого {total})")
