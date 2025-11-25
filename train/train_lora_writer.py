@@ -1,7 +1,7 @@
 # train/train_lora_writer.py
 # Обучение LoRA для "писателя" на Qwen2.5-7B-Instruct
-# по объединённому датасету writer_sft_dataset_posts.jsonl
-# (внутри и посты, и челленджи; формат: {"messages": [...]})
+# по датасету, где теперь нас интересуют только челленджи
+# Формат строки: {"messages": [...], "source_type": "post"|"challenge" или sample_type}
 
 import os
 import sys
@@ -35,7 +35,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 DATA_PATH = (
     os.getenv("WRITER_DATASET_PATH")
     or os.getenv("WRITER_DATA_PATH")
-    or os.path.join(BASE_DIR, "data", "writer_train.jsonl")
+    or os.path.join(BASE_DIR, "data", "/home/alex/Рабочий стол/Educasion/EngageX/data/writer_rewrite_train.jsonl")
 )
 
 # ======== Путь к локальной модели Qwen ========
@@ -60,22 +60,44 @@ if not os.path.exists(DATA_PATH):
     raise FileNotFoundError(f"Не найден датасет: {DATA_PATH}")
 
 # ================== ЗАГРУЗАЕМ ДАТАСЕТ ==================
-# Структура каждой строки:
-# {
-#   "messages": [
-#     {"role": "system", "content": "..."},
-#     {"role": "user", "content": "Канал: ... Цель недели: ... Цель: ... Фактура ..."},
-#     {"role": "assistant", "content": "... финальный пост / челлендж ..."}
-#   ]
-# }
 print(f"[{datetime.now().isoformat()}] 📂 Загружаем датасет...")
 raw_dataset = load_dataset(
     "json",
     data_files={"train": DATA_PATH},
 )
 
-train_len = len(raw_dataset["train"])
-print(f"[{datetime.now().isoformat()}] 📊 Размер train-части: {train_len} сэмплов\n")
+full_train = raw_dataset["train"]
+full_len = len(full_train)
+print(f"[{datetime.now().isoformat()}] 📊 Всего train-сэмплов: {full_len}")
+
+# === ФИЛЬТР: ОСТАВЛЯЕМ ТОЛЬКО ЧЕЛЛЕНДЖИ ==================
+def is_challenge(example: Dict[str, Any]) -> bool:
+    """
+    Поддерживаем оба варианта:
+    - example["source_type"] == "challenge"
+    - example["sample_type"]  == "challenge"
+    Если поля нет вообще (например, датасет уже заранее отфильтрован),
+    считаем, что это челлендж и оставляем строку.
+    """
+    st = example.get("source_type") or example.get("sample_type")
+    if st is None:
+        return True
+    return st == "challenge"
+
+print(f"[{datetime.now().isoformat()}] 🔍 Фильтруем только челленджи...")
+train_dataset = full_train.filter(is_challenge)
+
+challenge_len = len(train_dataset)
+print(
+    f"[{datetime.now().isoformat()}] ✅ После фильтрации: {challenge_len} челлендж-сэмплов "
+    f"(из {full_len} всего)\n"
+)
+
+if challenge_len == 0:
+    raise RuntimeError(
+        "После фильтрации по 'challenge' датасет пуст. "
+        "Проверь поля source_type/sample_type в jsonl."
+    )
 
 # ================== ЗАГРУЗКА ТОКЕНАЙЗЕРА И МОДЕЛИ ==================
 print(f"[{datetime.now().isoformat()}] 🔄 Загружаем токенайзер и модель...")
@@ -132,13 +154,11 @@ model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
 # ================== ТОКЕНИЗАЦИЯ ==================
-# Полноценный режим: длина контекста 1024 по умолчанию (можно переопределить в .env через WRITER_MAX_LEN)
 MAX_LEN = int(os.getenv("WRITER_MAX_LEN", "1024"))
 
 def tokenize_fn(example: Dict[str, Any]) -> Dict[str, Any]:
     messages = example["messages"]
 
-    # В messages уже зашита система, промпт (с Цель / Цель недели / Фактура) и ответ
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -153,15 +173,14 @@ def tokenize_fn(example: Dict[str, Any]) -> Dict[str, Any]:
         return_attention_mask=True,
     )
 
-    # Классический SFT: предсказываем весь текст целиком
     enc["labels"] = enc["input_ids"].copy()
     return enc
 
-print(f"[{datetime.now().isoformat()}] ✂️ Токенизируем датасет...")
-tokenized = raw_dataset.map(
+print(f"[{datetime.now().isoformat()}] ✂️ Токенизируем датасет челленджей...")
+tokenized_train = train_dataset.map(
     tokenize_fn,
     batched=False,
-    remove_columns=raw_dataset["train"].column_names,
+    remove_columns=train_dataset.column_names,
 )
 
 # ================== ТРЕНИРОВКА ==================
@@ -184,12 +203,12 @@ train_args = TrainingArguments(
 trainer = Trainer(
     model=model,
     args=train_args,
-    train_dataset=tokenized["train"],
+    train_dataset=tokenized_train,
     tokenizer=tokenizer,
 )
 
 if __name__ == "__main__":
-    print(f"[{datetime.now().isoformat()}] 🚀 Старт полноценного обучения LoRA...")
+    print(f"[{datetime.now().isoformat()}] 🚀 Старт обучения LoRA только на челленджах...")
     trainer.train()
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)

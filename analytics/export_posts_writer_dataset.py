@@ -1,10 +1,13 @@
 # analytics/export_posts_writer_dataset.py
-# Экспорт SFT-датасета для LoRA-writer из таблиц writer_samples и writer_challenges.
+# Экспорт SFT-датасета для LoRA-writer ТОЛЬКО из таблицы writer_challenges.
 #
-# writer_samples  — посты (sample_type='post' и т.п.)
 # writer_challenges — челленджи с полем week_goal.
-#
-# В итоге в одном JSONL-файле будут и посты, и челленджи.
+# На выходе — JSONL с полем "messages" в формате:
+# [
+#   {"role": "system", "content": ...},
+#   {"role": "user", "content": ...},
+#   {"role": "assistant", "content": ...}
+# ]
 
 import os
 import sys
@@ -21,9 +24,9 @@ import pathlib
 # -------------------------------------------------------
 # База проекта и .env
 # -------------------------------------------------------
-BASE_DIR = str(pathlib.Path(__file__).resolve().parents[1])
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+BASE_DIR = pathlib.Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
@@ -40,21 +43,19 @@ DB = {
 # -------------------------------------------------------
 
 WRITER_SYSTEM_MSG = (
-    "Ты — автор постов для Telegram-канала по крипте и IT. "
+    "Ты — автор постов и челленджей для Telegram-канала по крипте и IT. "
     "Пишешь ясно, по-деловому, без воды и кликбейта. "
     "Стиль: живой, но аккуратный, без токсичности и без фейков. "
-    "Опирайся на тему и цель поста, следи за структурой и логикой."
+    "Опирайся на тему и цель, следи за структурой и логикой."
 )
 
-# базовый шаблон: для постов будет как раньше,
-# для челленджей добавим строку про Цель недели
 WRITER_USER_TEMPLATE = (
     "Канал: {channel}\n"
     "{maybe_week_goal}"
     "Цель: {goal}\n\n"
-    "Фактура (краткий бриф по теме):\n"
+    "Фактура (краткий бриф по теме челленджа):\n"
     "\"\"\"\n{brief}\n\"\"\"\n\n"
-    "Напиши финальный пост для Telegram-канала."
+    "Напиши финальный текст челленджа для Telegram-канала."
 )
 
 
@@ -79,62 +80,6 @@ def build_user_prompt(
 
 
 # -------------------------------------------------------
-# Загрузка строк из writer_samples (посты)
-# -------------------------------------------------------
-
-async def fetch_writer_samples(
-    conn: asyncpg.Connection,
-    sample_type: Optional[str],
-    channel: Optional[str],
-    limit: Optional[int],
-) -> List[asyncpg.Record]:
-    """
-    Читает строки из writer_samples, которые готовы для обучения:
-    - final_post не пустой,
-    - можно отфильтровать по sample_type ('post' / 'challenge' / и т.д.),
-      по каналу и по лимиту.
-    """
-    where_clauses = ["final_post IS NOT NULL", "trim(final_post) <> ''"]
-    params: List[Any] = []
-    idx = 1
-
-    if sample_type:
-        where_clauses.append(f"sample_type = ${idx}")
-        params.append(sample_type)
-        idx += 1
-
-    if channel:
-        where_clauses.append(f"channel_username = ${idx}")
-        params.append(channel)
-        idx += 1
-
-    where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
-
-    limit_sql = ""
-    if limit is not None and limit > 0:
-        limit_sql = f"LIMIT {int(limit)}"
-
-    sql = f"""
-        SELECT
-            id,
-            sample_type,
-            source_post_id,
-            channel_username,
-            goal,
-            topic_brief,
-            final_post,
-            created_at
-        FROM writer_samples
-        WHERE {where_sql}
-        ORDER BY id
-        {limit_sql};
-    """
-
-    rows = await conn.fetch(sql, *params)
-    return rows
-
-
-# -------------------------------------------------------
 # Загрузка строк из writer_challenges (челленджи)
 # -------------------------------------------------------
 
@@ -146,11 +91,14 @@ async def fetch_writer_challenges(
     """
     Читает строки из writer_challenges, которые готовы для обучения:
     - final_challenge не пустой,
+    - gen_status = 'ok',
     - можно отфильтровать по каналу и по лимиту.
-    Ожидаемые поля: id, source_post_id, channel_username,
-    week_goal, goal, topic_brief, final_challenge.
     """
-    where_clauses = ["final_challenge IS NOT NULL", "trim(final_challenge) <> ''"]
+    where_clauses = [
+        "final_challenge IS NOT NULL",
+        "trim(final_challenge) <> ''",
+        "gen_status = 'ok'",
+    ]
     params: List[Any] = []
     idx = 1
 
@@ -184,31 +132,52 @@ async def fetch_writer_challenges(
     return rows
 
 
+async def count_writer_challenges_candidates(
+    conn: asyncpg.Connection,
+    channel: Optional[str],
+) -> int:
+    """
+    Считает количество кандидатов в writer_challenges:
+    - final_challenge не пустой,
+    - ЛЮБОЙ gen_status,
+    - те же фильтры по channel.
+    """
+    where_clauses = ["final_challenge IS NOT NULL", "trim(final_challenge) <> ''"]
+    params: List[Any] = []
+    idx = 1
+
+    if channel:
+        where_clauses.append(f"channel_username = ${idx}")
+        params.append(channel)
+        idx += 1
+
+    where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
+
+    sql = f"""
+        SELECT COUNT(*)
+        FROM writer_challenges
+        WHERE {where_sql};
+    """
+
+    cnt = await conn.fetchval(sql, *params)
+    return int(cnt or 0)
+
 
 # -------------------------------------------------------
-# Основная логика экспорта
+# Основная логика экспорта (ТОЛЬКО writer_challenges)
 # -------------------------------------------------------
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Export SFT dataset for LoRA-writer from writer_samples and writer_challenges."
+        description="Export SFT dataset for LoRA-writer ONLY from writer_challenges."
     )
 
     parser.add_argument(
         "--out",
         type=str,
-        default=os.path.join(BASE_DIR, "data", "writer_sft_dataset_posts.jsonl"),
-        help="Путь к выходному JSONL (по умолчанию: ./data/writer_sft_dataset_posts.jsonl)",
-    )
-    parser.add_argument(
-        "--sample-type",
-        type=str,
-        default="post",
-        choices=["post", "challenge", "all"],
-        help=(
-            "Тип сэмплов для таблицы writer_samples: 'post', 'challenge' или 'all'. "
-            "По умолчанию: post."
-        ),
+        # можешь поменять дефолт на writer_train.jsonl, если хочешь прямо матчить train-скрипт
+        default=os.path.join(BASE_DIR, "data", "writer_train.jsonl"),
+        help="Путь к выходному JSONL (по умолчанию: ./data/writer_train.jsonl)",
     )
     parser.add_argument(
         "--channel",
@@ -220,12 +189,7 @@ async def main():
         "--limit",
         type=int,
         default=None,
-        help="Максимальное количество примеров из каждой таблицы (по умолчанию: без ограничения).",
-    )
-    parser.add_argument(
-        "--no-challenges",
-        action="store_true",
-        help="Не добавлять строки из writer_challenges (по умолчанию: добавляем).",
+        help="Максимальное количество примеров (по умолчанию: без ограничения).",
     )
 
     args = parser.parse_args()
@@ -235,111 +199,45 @@ async def main():
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    if args.sample_type == "all":
-        sample_type = None
-    else:
-        sample_type = args.sample_type
-
-    include_challenges = not args.no_challenges
-
     print(f"[{datetime.now().isoformat()}] Подключаемся к БД {DB['database']}...")
     conn = await asyncpg.connect(**DB)
 
     try:
-        # ---------- POSTS (writer_samples) ----------
+        # ---------- CHALLENGES (writer_challenges) ----------
         print(
-            f"[{datetime.now().isoformat()}] Загружаем из writer_samples "
-            f"(sample_type={sample_type}, channel={args.channel})..."
+            f"[{datetime.now().isoformat()}] Загружаем из writer_challenges "
+            f"(channel={args.channel})..."
         )
-        posts_rows = await fetch_writer_samples(
+
+        total_challenges_candidates = await count_writer_challenges_candidates(
             conn=conn,
-            sample_type=sample_type,
+            channel=args.channel,
+        )
+
+        challenges_rows = await fetch_writer_challenges(
+            conn=conn,
             channel=args.channel,
             limit=args.limit,
         )
-        total_posts = len(posts_rows)
-        print(
-            f"[{datetime.now().isoformat()}] Найдено {total_posts} обучающих примеров в writer_samples."
+        total_challenges = len(challenges_rows)
+        skipped_challenges_by_status = max(
+            total_challenges_candidates - total_challenges, 0
         )
 
-        # ---------- CHALLENGES (writer_challenges) ----------
-        challenges_rows: List[asyncpg.Record] = []
-        total_challenges = 0
+        print(
+            f"[{datetime.now().isoformat()}] Найдено {total_challenges} обучающих примеров в writer_challenges "
+            f"(кандидатов по тексту: {total_challenges_candidates}, "
+            f"отсеяно по статусу gen_status != 'ok': {skipped_challenges_by_status})."
+        )
 
-        if include_challenges:
-            print(
-                f"[{datetime.now().isoformat()}] Загружаем из writer_challenges "
-                f"(channel={args.channel})..."
-            )
-            challenges_rows = await fetch_writer_challenges(
-                conn=conn,
-                channel=args.channel,
-                limit=args.limit,
-            )
-            total_challenges = len(challenges_rows)
-            print(
-                f"[{datetime.now().isoformat()}] Найдено {total_challenges} обучающих примеров в writer_challenges."
-            )
-        else:
-            print(
-                f"[{datetime.now().isoformat()}] writer_challenges пропущена (--no-challenges)."
-            )
-
-        if total_posts == 0 and total_challenges == 0:
-            print("⚠️ Нет данных ни в writer_samples, ни в writer_challenges.")
+        if total_challenges == 0:
+            print("⚠️ Нет данных в writer_challenges (после фильтрации).")
             return
 
-        total_all = total_posts + total_challenges
         written = 0
         i = 0
 
         with open(out_path, "w", encoding="utf-8") as f:
-            # сначала посты
-            for r in posts_rows:
-                i += 1
-                channel = r["channel_username"]
-                goal = r["goal"] or ""
-                brief = r["topic_brief"] or ""
-                final_post = (r["final_post"] or "").strip()
-
-                if not final_post:
-                    continue
-
-                user_prompt = build_user_prompt(
-                    channel=channel,
-                    goal=goal,
-                    brief=brief,
-                    week_goal=None,  # для постов недели нет
-                )
-
-                sample = {
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": WRITER_SYSTEM_MSG,
-                        },
-                        {
-                            "role": "user",
-                            "content": user_prompt,
-                        },
-                        {
-                            "role": "assistant",
-                            "content": final_post,
-                        },
-                    ]
-                }
-
-                f.write(json.dumps(sample, ensure_ascii=False) + "\n")
-                written += 1
-
-                if i % 50 == 0 or i == total_all:
-                    print(
-                        f"[{datetime.now().isoformat()}] Экспортировано {i}/{total_all} (записано {written})",
-                        end="\r",
-                        flush=True,
-                    )
-
-            # затем челленджи
             for r in challenges_rows:
                 i += 1
                 channel = r["channel_username"]
@@ -355,7 +253,7 @@ async def main():
                     channel=channel,
                     goal=goal,
                     brief=brief,
-                    week_goal=week_goal,  # вот тут подмешиваем неделю
+                    week_goal=week_goal,
                 )
 
                 sample = {
@@ -378,9 +276,9 @@ async def main():
                 f.write(json.dumps(sample, ensure_ascii=False) + "\n")
                 written += 1
 
-                if i % 50 == 0 or i == total_all:
+                if i % 50 == 0 or i == total_challenges:
                     print(
-                        f"[{datetime.now().isoformat()}] Экспортировано {i}/{total_all} (записано {written})",
+                        f"[{datetime.now().isoformat()}] Экспортировано {i}/{total_challenges} (записано {written})",
                         end="\r",
                         flush=True,
                     )
@@ -389,7 +287,11 @@ async def main():
         print(f"[{datetime.now().isoformat()}] ✅ Экспорт завершён. Файл: {out_path}")
         print(
             f"[{datetime.now().isoformat()}] Всего записей: {written} "
-            f"(writer_samples={total_posts}, writer_challenges={total_challenges})"
+            f"(writer_challenges={total_challenges})"
+        )
+        print(
+            f"[{datetime.now().isoformat()}] Отброшено по статусу gen_status != 'ok': "
+            f"writer_challenges={skipped_challenges_by_status}"
         )
 
     finally:
