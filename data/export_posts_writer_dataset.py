@@ -1,7 +1,7 @@
 # analytics/export_posts_writer_dataset.py
 # Экспорт SFT-датасета для LoRA-writer ТОЛЬКО из таблицы writer_challenges.
 #
-# writer_challenges — челленджи с полем week_goal.
+# writer_challenges — челленджи с полями week_goal, style, goal, topic_brief, final_challenge.
 # На выходе — JSONL с полем "messages" в формате:
 # [
 #   {"role": "system", "content": ...},
@@ -43,16 +43,20 @@ DB = {
 # -------------------------------------------------------
 
 WRITER_SYSTEM_MSG = (
-    "Ты — автор постов и челленджей для Telegram-канала по крипте и IT. "
+    "Ты — автор челленджей и коротких постов для Telegram-канала "
+    "про фитнес и здоровый образ жизни. "
     "Пишешь ясно, по-деловому, без воды и кликбейта. "
-    "Стиль: живой, но аккуратный, без токсичности и без фейков. "
-    "Опирайся на тему и цель, следи за структурой и логикой."
+    "Стиль можешь адаптировать под задачу (дружелюбный, спокойный, мотивационный и т.п.), "
+    "но всегда остаёшься уважительным и поддерживающим. "
+    "Опирайся на цель челленджа, фактуру и указанную цель недели, "
+    "следи за структурой и логикой, не усложняй формулировки."
 )
 
 WRITER_USER_TEMPLATE = (
     "Канал: {channel}\n"
     "{maybe_week_goal}"
-    "Цель: {goal}\n\n"
+    "{maybe_style}"
+    "Цель челленджа: {goal}\n\n"
     "Фактура (краткий бриф по теме челленджа):\n"
     "\"\"\"\n{brief}\n\"\"\"\n\n"
     "Напиши финальный текст челленджа для Telegram-канала."
@@ -64,16 +68,34 @@ def build_user_prompt(
     goal: str,
     brief: str,
     week_goal: Optional[str] = None,
+    style: Optional[str] = None,
 ) -> str:
+    """
+    Собираем промпт для обучения:
+    - Канал
+    - Цель недели (если есть)
+    - Стиль (если есть)
+    - Цель челленджа
+    - Фактура (topic_brief)
+    """
     ch = channel or "не указан"
+
     wg = (week_goal or "").strip()
     if wg:
         maybe_week_goal = f"Цель недели: {wg}\n"
     else:
         maybe_week_goal = ""
+
+    st = (style or "").strip()
+    if st:
+        maybe_style = f"Стиль: {st}\n"
+    else:
+        maybe_style = ""
+
     return WRITER_USER_TEMPLATE.format(
         channel=ch,
         maybe_week_goal=maybe_week_goal,
+        maybe_style=maybe_style,
         goal=(goal or "").strip(),
         brief=(brief or "").strip(),
     )
@@ -121,6 +143,7 @@ async def fetch_writer_challenges(
             week_goal,
             goal,
             topic_brief,
+            style,
             final_challenge AS final_post
         FROM writer_challenges
         WHERE {where_sql}
@@ -169,13 +192,13 @@ async def count_writer_challenges_candidates(
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Export SFT dataset for LoRA-writer ONLY from writer_challenges."
+        description="Export SFT dataset for LoRA-writer ONLY from writer_challenges (fitness)."
     )
 
     parser.add_argument(
         "--out",
         type=str,
-        # можешь поменять дефолт на writer_train.jsonl, если хочешь прямо матчить train-скрипт
+        # дефолт матчит train-скрипт: train_lora_writer.py -> writer_train.jsonl
         default=os.path.join(BASE_DIR, "data", "writer_train.jsonl"),
         help="Путь к выходному JSONL (по умолчанию: ./data/writer_train.jsonl)",
     )
@@ -244,6 +267,7 @@ async def main():
                 goal = r["goal"] or ""
                 week_goal = r["week_goal"] or ""
                 brief = r["topic_brief"] or ""
+                style = r.get("style") or ""
                 final_post = (r["final_post"] or "").strip()
 
                 if not final_post:
@@ -254,6 +278,7 @@ async def main():
                     goal=goal,
                     brief=brief,
                     week_goal=week_goal,
+                    style=style,
                 )
 
                 sample = {

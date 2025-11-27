@@ -52,10 +52,8 @@ DB = {
 }
 
 JUDGE_BATCH = int(os.getenv("JUDGE_BATCH", "32"))
-PROCESSING_TIMEOUT_MINUTES = int(os.getenv("PROCESSING_TIMEOUT_MINUTES", "15"))
 MODEL_VERSION = os.getenv("MODEL_VERSION", "qwen-local-v1")
 SAMPLE_MODE = os.getenv("SAMPLE_MODE", "0")
-MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "3"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "512"))
 
 # globals for model
@@ -86,15 +84,33 @@ def ensure_model():
 
 # prompts
 SYSTEM_MSG = (
-    "Ты — строгий, беспристрастный модератор и редактор. "
-    "Оцени качество поста для онлайн-сообщества (крипто): ясность, полезность, вовлечение, токсичность/этика, структура.\n"
+    "Ты — строгий, но простой модератор. "
+    "Твоя ЕДИНСТВЕННАЯ задача — проверить, относится ли пост к тематике фитнеса, "
+    "тренировок и здорового образа жизни.\n"
+    "\n"
+    "Считай пост «по теме», если он про одно из следующего (не обязательно всё сразу):\n"
+    "- упражнения, тренировки, планы тренировок, комплексы упражнений "
+    "(в том числе короткие, типа «тренировка пресса за 7 минут»);\n"
+    "- мотивация к занятиям спортом, прогресс в тренировках;\n"
+    "- питание, восстановление, сон в контексте формы и здоровья;\n"
+    "- любые советы, которые помогают человеку лучше тренироваться или поддерживать форму.\n"
+    "\n"
+    "Если пост по теме — ставь is_good=true и score=100.\n"
+    "Если пост НЕ по теме (политика, новости, мемы, крипта, бизнес ни разу не про фитнес и т.п.) — "
+    "ставь is_good=false и score=0.\n"
+    "\n"
+    "Можешь кратко объяснить решение в массиве reasons.\n"
+    "Поля labels заполни любыми числами от 0 до 100 по своему усмотрению, главное — чтобы JSON был валидный.\n"
+    "\n"
     "ВЕРНИ ТОЛЬКО ОДИН ВАЛИДНЫЙ JSON. НИЧЕГО БОЛЬШЕ.\n"
-    "Формат JSON: {\"score\": <0..100>, \"is_good\": <true|false>, \"reasons\": [..], \"labels\": {\"clarity\":..,\"usefulness\":..,\"engagement\":..,\"ethics\":..}}\n"
+    "Формат JSON: {\"score\": <0..100>, \"is_good\": <true|false>, \"reasons\": [..], "
+    "\"labels\": {\"clarity\":..,\"usefulness\":..,\"engagement\":..,\"ethics\":..}}\n"
 )
 
 PROMPT_USER_TEMPLATE = (
     "POST_ID: {post_id}\nCHANNEL: {channel}\n"
-    "METRICS: views={views}, forwards={forwards}, reactions={reactions}, comments={comments}, engagement_rate={engagement_rate}\n"
+    "METRICS: views={views}, forwards={forwards}, reactions={reactions}, "
+    "comments={comments}, engagement_rate={engagement_rate}\n"
     "POST:\n\"\"\"\n{post}\n\"\"\"\n\n"
     "Верни ТОЛЬКО JSON в указанном формате."
 )
@@ -306,10 +322,7 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         metrics = it.get("metrics", {})
         # progress print
         now = time.time()
-        if last_time:
-            avg = now - last_time
-        else:
-            avg = 0.0
+        avg = (now - last_time) if last_time else 0.0
         last_time = now
         print(
             f"[{datetime.now().isoformat()}] LLM infer: {i}/{total} post_id={post_id} avg_last={avg:.2f}s",
@@ -331,7 +344,6 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             input_dict = _to_device_and_prepare(normalized, device)
         except Exception as e:
             warnings.warn(f"Tokenization failed for post {post_id}: {e}")
-            # fallback heuristic
             fb = heuristic_fallback_score(metrics)
             results.append(
                 {
@@ -448,6 +460,8 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # extract JSON
         js = extract_or_recover_json(gen_text)
         raw_out = gen_text
+        reason_tag = None
+
         if js is None:
             # try secondary extraction with model itself
             js = extract_with_model(gen_text)
@@ -455,11 +469,8 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 reason_tag = "recovered_by_model"
             else:
                 reason_tag = "bad_json"
-        else:
-            reason_tag = None
 
         if js is None:
-            # fallback heuristic
             fb = heuristic_fallback_score(metrics)
             results.append(
                 {
@@ -480,14 +491,21 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         # parse js fields
         try:
-            score = float(js.get("score", 0))
             is_good = bool(js.get("is_good", False))
             reasons = js.get("reasons", [])
             labels = js.get("labels", {})
+
+            # бинарный скор: только по факту «по теме / не по теме»
+            score = 100.0 if is_good else 0.0
+
+            entry_reasons = reasons[:6] if isinstance(reasons, list) else [str(reasons)]
+            if reason_tag:
+                entry_reasons.append(reason_tag)
+
             entry = {
-                "score": max(0.0, min(100.0, score)),
-                "is_good": bool(is_good),
-                "reasons": reasons[:6] if isinstance(reasons, list) else [str(reasons)],
+                "score": score,
+                "is_good": is_good,
+                "reasons": entry_reasons,
                 "labels": {
                     "clarity": float(labels.get("clarity", 0)),
                     "usefulness": float(labels.get("usefulness", 0)),
@@ -497,8 +515,6 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "raw_output": (raw_out[:2000] if raw_out else ""),
                 "inference_time_s": inference_time,
             }
-            if reason_tag:
-                entry["reasons"].append(reason_tag)
             results.append(entry)
         except Exception as e:
             warnings.warn(f"Failed to parse js for post {post_id}: {e}")
@@ -520,7 +536,6 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             )
             continue
 
-    # end loop
     print()  # newline after progress line
     # show GPU mem if available
     try:
@@ -540,18 +555,22 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # ------------------- DB helpers for atomic batches -------------------
 async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
     """
-    1) SELECT ids FOR UPDATE SKIP LOCKED on posts only
-    2) UPDATE posts to processing for these ids
-    3) SELECT detailed rows (with joins) for those ids
-    returns list of rows
+    Выбираем батч постов, для которых ещё нет записи в post_quality.
+    Защита от гонок — через FOR UPDATE SKIP LOCKED.
     """
-    # Step 1: get ids (locked)
     rows = await conn.fetch(
-        "SELECT id FROM posts p "
-        "WHERE p.processing_status = 'new' "
-        "  AND NOT EXISTS (SELECT 1 FROM post_quality pq WHERE pq.post_id = p.id) "
-        "ORDER BY p.id "
-        "LIMIT $1 FOR UPDATE SKIP LOCKED",
+        """
+        SELECT p.id
+        FROM posts p
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM post_quality pq
+            WHERE pq.post_id = p.id
+        )
+        ORDER BY p.id
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+        """,
         batch,
     )
     if not rows:
@@ -559,19 +578,12 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
 
     ids = [r["id"] for r in rows]
 
-    # Step 2: mark as processing
-    await conn.execute(
-        "UPDATE posts SET processing_status='processing', processor_pid=$1, processing_started_at=now() WHERE id = ANY($2::int[])",
-        pid,
-        ids,
-    )
-
-    # Step 3: collect details for those ids
     fetch_sql = """
     SELECT p.id,
            p.channel_username,
            COALESCE(cp.clean_text, p.post_text) AS text,
-           p.views, p.forwards
+           p.views,
+           p.forwards
     FROM posts p
     LEFT JOIN clean_posts cp ON cp.source_post_id = p.id
     WHERE p.id = ANY($1::int[])
@@ -582,7 +594,8 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
     # aggregate reactions and comments for these ids
     reactions = {}
     rows_r = await conn.fetch(
-        "SELECT post_id, SUM(reaction_count) AS reactions_sum FROM reactions WHERE post_id = ANY($1::int[]) GROUP BY post_id",
+        "SELECT post_id, SUM(reaction_count) AS reactions_sum "
+        "FROM reactions WHERE post_id = ANY($1::int[]) GROUP BY post_id",
         ids,
     )
     for r in rows_r:
@@ -590,13 +603,13 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
 
     comments = {}
     rows_c = await conn.fetch(
-        "SELECT post_id, COUNT(*) AS comments_count FROM comments WHERE post_id = ANY($1::int[]) GROUP BY post_id",
+        "SELECT post_id, COUNT(*) AS comments_count "
+        "FROM comments WHERE post_id = ANY($1::int[]) GROUP BY post_id",
         ids,
     )
     for r in rows_c:
         comments[r["post_id"]] = int(r["comments_count"] or 0)
 
-    # build result rows with metrics
     result = []
     for r in rows2:
         pid_row = int(r["id"])
@@ -643,15 +656,6 @@ SET quality_score = EXCLUDED.quality_score,
     updated_at    = now();
 """
 
-# helper to reset stuck records older than timeout (minutes)
-RESET_STUCK_SQL = """
-UPDATE posts
-SET processing_status = 'new', processor_pid = NULL, processing_started_at = NULL
-WHERE processing_status = 'processing'
-  AND processing_started_at < now() - ($1 * INTERVAL '1 minute')
-RETURNING id;
-"""
-
 
 # ------------------- main loop -------------------
 async def main():
@@ -660,51 +664,58 @@ async def main():
 
     conn = await asyncpg.connect(**DB)
     try:
-        # 🔹 Считаем, сколько новых постов ждут оценки
+        # сколько постов ещё не оценено
         total_planned = await conn.fetchval(
             """
-            SELECT COUNT(*) 
+            SELECT COUNT(*)
             FROM posts p
-            WHERE p.processing_status = 'new'
-              AND NOT EXISTS (
-                  SELECT 1 
-                  FROM post_quality pq 
-                  WHERE pq.post_id = p.id
-              )
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM post_quality pq
+                WHERE pq.post_id = p.id
+            )
             """
         )
         print(
-            f"[{datetime.now().isoformat()}] 📊 Найдено {total_planned} постов в статусе 'new' без оценки. "
+            f"[{datetime.now().isoformat()}] 📊 Найдено {total_planned} постов без оценки. "
             f"Будем обрабатывать батчами по {JUDGE_BATCH}."
         )
 
         pid = os.getpid()
         total = 0
-        last_reset = datetime.now()
 
         while True:
-            # periodic reset of stuck records
-            if (datetime.now() - last_reset).total_seconds() > 600:
-                rows = await conn.fetch(RESET_STUCK_SQL, PROCESSING_TIMEOUT_MINUTES)
-                if rows:
-                    print(
-                        f"[{datetime.now().isoformat()}] Reset {len(rows)} stuck posts -> 'new'"
-                    )
-                last_reset = datetime.now()
-
-            # atomic fetch + mark
             async with conn.transaction():
                 items = await atomic_fetch_and_mark(conn, JUDGE_BATCH, pid)
 
             if not items:
-                print(f"[{datetime.now().isoformat()}] Нет новых постов для обработки. Выход.")
-                break
+                # дополнительная проверка: вдруг пока работали, добавились посты
+                remaining = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM posts p
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM post_quality pq
+                        WHERE pq.post_id = p.id
+                    )
+                    """
+                )
+                if remaining == 0:
+                    print(
+                        f"[{datetime.now().isoformat()}] Нет новых постов для обработки (повторная проверка). Выход."
+                    )
+                    break
+                else:
+                    print(
+                        f"[{datetime.now().isoformat()}] Повторная проверка: найдено ещё {remaining} новых постов. Продолжаем."
+                    )
+                    continue
 
             print(
                 f"[{datetime.now().isoformat()}] -> fetched rows: {len(items)}; GPU status check..."
             )
 
-            # prepare inputs for infer
             inputs = []
             metas = []
             for row in items:
@@ -725,17 +736,12 @@ async def main():
                 )
                 metas.append((row["id"], row["channel_username"]))
 
-            # call inference
             print(
                 f"[{datetime.now().isoformat()}] Calling infer_batch for {len(inputs)} items ..."
             )
             judged = infer_batch(inputs)
 
-            # build upserts and status changes
             upserts = []
-            done_ids = []
-            bump_attempts = []
-
             for meta, res, it in zip(metas, judged, inputs):
                 pid_item, ch = meta
                 signals = {
@@ -750,7 +756,6 @@ async def main():
                     "inference_time_s": res.get("inference_time_s", None),
                 }
 
-                # Пока по договорённости: всегда ставим gen_status = 'ok'
                 gen_status = "ok"
 
                 upserts.append(
@@ -764,69 +769,7 @@ async def main():
                     )
                 )
 
-                reasons = signals["reasons"]
-                if reasons and any(
-                    r in ("bad_json", "bad_json_fallback", "tokenization_failed_fallback")
-                    for r in reasons
-                ):
-                    bump_attempts.append(pid_item)
-                else:
-                    done_ids.append(pid_item)
-
-            # write results to post_quality
             await conn.executemany(UPSERT_SQL, upserts)
-
-            # mark done
-            if done_ids:
-                await conn.execute(
-                    """
-                    UPDATE posts 
-                    SET processing_status='done',
-                        processing_started_at=NULL,
-                        processor_pid=NULL
-                    WHERE id = ANY($1::int[])
-                    """,
-                    done_ids,
-                )
-
-            # handle bumped attempts
-            for bid in bump_attempts:
-                await conn.execute(
-                    "UPDATE posts SET attempts = COALESCE(attempts,0) + 1 WHERE id = $1",
-                    bid,
-                )
-                attempts_now = await conn.fetchval(
-                    "SELECT attempts FROM posts WHERE id = $1",
-                    bid,
-                )
-                if attempts_now >= MAX_ATTEMPTS:
-                    await conn.execute(
-                        """
-                        UPDATE posts 
-                        SET processing_status='error',
-                            processing_started_at=NULL,
-                            processor_pid=NULL
-                        WHERE id = $1
-                        """,
-                        bid,
-                    )
-                    print(
-                        f"[{datetime.now().isoformat()}] Post {bid} -> marked error after {attempts_now} attempts"
-                    )
-                else:
-                    await conn.execute(
-                        """
-                        UPDATE posts 
-                        SET processing_status='new',
-                            processing_started_at=NULL,
-                            processor_pid=NULL
-                        WHERE id = $1
-                        """,
-                        bid,
-                    )
-                    print(
-                        f"[{datetime.now().isoformat()}] Post {bid} -> scheduled for retry (attempt {attempts_now})"
-                    )
 
             total += len(items)
             print(f"[{datetime.now().isoformat()}]  ✓ +{len(items)} (итого {total})")
