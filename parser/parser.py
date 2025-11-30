@@ -158,7 +158,6 @@ class DatabaseManager:
                 )
             ''')
 
-
             await self.connection.execute('''
                 CREATE TABLE IF NOT EXISTS post_quality (
                     post_id INTEGER PRIMARY KEY REFERENCES posts(id) ON DELETE CASCADE,
@@ -276,6 +275,18 @@ class DatabaseManager:
         except Exception as e:
             print(f"❌ Ошибка обновления ingest_status для post_id={post_db_id}: {e}")
 
+    async def get_done_post_ids(self, channel_username: str):
+        """
+        Возвращает множество Telegram post_id,
+        которые уже полностью обработаны (ingest_status = 'done').
+        """
+        rows = await self.connection.fetch('''
+            SELECT post_id
+            FROM posts
+            WHERE channel_username = $1 AND ingest_status = 'done'
+        ''', channel_username)
+        return {row['post_id'] for row in rows}
+
     async def print_ingest_status_stats(self):
         """Простая аналитика: сколько постов в каком статусе ingest_status."""
         try:
@@ -298,36 +309,42 @@ class DatabaseManager:
 
 
 async def parse_single_channel(db: DatabaseManager, client: TelegramClient, channel_username: str):
-    """Парсит один канал и пишет в БД только новые посты.
-    Для каждого поста:
-    - по умолчанию считаем статус 'error';
-    - если весь пайплайн (post + reactions + comments) отработал — ставим 'done'.
+    """
+    Парсит один канал и пишет в БД посты.
+    Логика:
+
+    - Берём ВСЮ историю канала (от старых к новым).
+    - Для постов с ingest_status = 'done' — ничего не делаем.
+    - Для новых / проблемных (pending/error) — пробуем заново:
+      * сохраняем пост,
+      * реакции,
+      * комментарии (ошибки по комментариям не ломают пост).
     """
     print(f"\n🔍 Анализируем канал: @{channel_username}")
 
     channel = await client.get_entity(channel_username)
 
-    last_post_id = await db.connection.fetchval('''
-        SELECT MAX(post_id) FROM posts WHERE channel_username = $1
-    ''', channel_username)
-
-    if last_post_id:
-        print(f"➡️ Последний Telegram post_id={last_post_id}, парсим ТОЛЬКО новые (id > {last_post_id})...")
-    else:
-        print("🆕 В БД нет записей по этому каналу — парсим весь канал с нуля")
+    # Загружаем уже полностью обработанные посты (ingest_status = 'done')
+    done_ids = await db.get_done_post_ids(channel_username)
+    print(f"ℹ️ Уже обработано (ingest_status='done'): {len(done_ids)} постов")
 
     total_posts = 0
     total_comments = 0
     total_reactions = 0
+    processed_new = 0
 
-    print("📥 Собираем посты...")
+    print("📥 Собираем посты (полная история, от старых к новым)...")
 
     async for message in client.iter_messages(
         channel,
         limit=POSTS_LIMIT,
-        min_id=last_post_id or 0
+        reverse=True,   # от старых к новым
     ):
         if not message.text:
+            continue
+
+        # Если этот post_id уже был полностью обработан — пропускаем
+        if message.id in done_ids:
             continue
 
         total_posts += 1
@@ -365,9 +382,10 @@ async def parse_single_channel(db: DatabaseManager, client: TelegramClient, chan
 
             # Если дошли до сюда без исключений — считаем, что всё ок
             post_status = 'done'
+            processed_new += 1
 
             print(
-                f"✅ Новый пост {message.id}: "
+                f"✅ Пост {message.id}: "
                 f"{post_comments_count} коммент., {post_reactions_count} реакц. "
                 f"[ingest_status={post_status}]"
             )
@@ -382,9 +400,10 @@ async def parse_single_channel(db: DatabaseManager, client: TelegramClient, chan
 
     print("\n" + "-" * 60)
     print(f"📊 ИТОГИ КАНАЛА @{channel_username}:")
-    print(f"📄 Новых постов: {total_posts}")
-    print(f"💬 Комментариев: {total_comments}")
-    print(f"🎭 Реакций: {total_reactions}")
+    print(f"📄 Обработано новых/проблемных постов: {processed_new}")
+    print(f"📄 Всего просмотрено постов (без учёта уже done): {total_posts}")
+    print(f"💬 Комментариев сохранено: {total_comments}")
+    print(f"🎭 Реакций сохранено: {total_reactions}")
     print("-" * 60)
 
 
@@ -455,6 +474,11 @@ async def extract_reactions_to_dict(message, reactions_dict):
 
 
 async def extract_comments_as_strings(client, channel, message):
+    """
+    Возвращает список текстов комментариев.
+    ВАЖНО: если при запросе комментариев возникает ошибка (в т.ч. MESSAGE_ID_INVALID),
+    мы ЛОГУЕМ её, но НЕ бросаем наверх — пост всё равно будет считаться обработанным.
+    """
     comments_strings = []
 
     try:
@@ -468,8 +492,9 @@ async def extract_comments_as_strings(client, channel, message):
                 comments_strings.append(comment_text)
 
     except Exception as e:
+        # не роняем пайплайн — просто считаем, что у поста нет комментариев
         print(f"Ошибка при извлечении комментариев к посту {message.id}: {e}")
-        raise
+        return comments_strings
 
     return comments_strings
 

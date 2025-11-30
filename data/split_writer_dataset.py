@@ -11,7 +11,7 @@ BASE_DIR = str(pathlib.Path(__file__).resolve().parents[1])
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-DATA_PATH = os.path.join(BASE_DIR, "data", "writer_sft_dataset_posts.jsonl")
+DATA_PATH = os.path.join(BASE_DIR, "data", "writer_train.jsonl")
 TRAIN_PATH = os.path.join(BASE_DIR, "data", "writer_rewrite_train.jsonl")
 VAL_PATH   = os.path.join(BASE_DIR, "data", "writer_rewrite_val.jsonl")
 
