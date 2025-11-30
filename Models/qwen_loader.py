@@ -114,7 +114,7 @@ def load_tokenizer_model() -> Tuple[AutoTokenizer, AutoModelForCausalLM]:
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        **model_kwargs,
+        **model_kwargs
     )
 
     return tokenizer, model
