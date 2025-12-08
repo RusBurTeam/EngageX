@@ -7,7 +7,12 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.types import Message, CallbackQuery
 
-from ..db import save_challenge_answer, get_user_answers_for_user
+from ..db import (
+    save_challenge_answer,
+    get_user_answers_for_user,
+    update_challenge_metric_on_answer,
+    log_challenge_click,
+)
 from ..services.challenges import get_challenge_by_id, generate_challenge_qa_answer
 from ..keyboards.user import user_main_kb, answer_kb, qa_kb
 
@@ -212,6 +217,14 @@ async def handle_user_message(message: Message) -> None:
             answer_text=text,
         )
 
+        # ===== НОВЫЙ КОД: Обновление метрик =====
+        try:
+            await update_challenge_metric_on_answer(ch_id)
+            logging.info(f"Пользователь {user_id} ответил на челлендж {ch_id}")
+        except Exception as e:
+            logging.error(f"Ошибка обновления метрик для челленджа {ch_id}: {e}")
+        # ===== КОНЕЦ НОВОГО КОДА =====
+
         await message.answer(
             "✅ Спасибо! Твой ответ сохранён.\n\n"
             "Админы смогут посмотреть его в аналитике.",
@@ -222,6 +235,17 @@ async def handle_user_message(message: Message) -> None:
     # --- режим Q&A ---
     if user_id in _qa_state:
         ch_id = _qa_state[user_id]
+
+        # Логирование клика на "Узнать больше"
+        try:
+            # Если это первый вход в Q&A (первое сообщение после кнопки)
+            # Записываем как клик на "learn_more"
+            if text.lower() not in ['/start', '/cabinet', '/cancel']:
+                await log_challenge_click(ch_id, user_id, "learn_more")
+        except Exception as e:
+            logging.error(f"Ошибка логирования клика для челленджа {ch_id}: {e}")
+        # ===== КОНЕЦ НОВОГО КОДА =====
+
         ch = await get_challenge_by_id(ch_id)
         if not ch:
             _qa_state.pop(user_id, None)

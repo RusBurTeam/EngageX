@@ -107,6 +107,85 @@ async def init_db() -> None:
             );
             """
         )
+        # -------- challenge_metrics -------- (ОСНОВНАЯ ТАБЛИЦА МЕТРИК)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS challenge_metrics (
+                id SERIAL PRIMARY KEY,
+                challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+
+                -- Тип недели цикла (из ТЗ)
+                week_type VARCHAR(20) NOT NULL DEFAULT 'engagement',
+                    -- 'engagement'    (неделя 1) - вовлечение
+                    -- 'retention'     (неделя 2) - удержание  
+                    -- 'conversion'    (неделя 3) - конверсия/продажи
+                    -- 'reactivation'  (неделя 4) - реактивация
+
+                -- Основные метрики вовлечения
+                sent_to_count INTEGER DEFAULT 0,      -- скольким пользователям отправлено
+                responses_count INTEGER DEFAULT 0,     -- сколько ответов получено
+                response_rate DECIMAL(5,2) DEFAULT 0.0, -- процент ответов
+
+                -- Метрики взаимодействия
+                views_count INTEGER DEFAULT 0,        -- сколько раз просмотрели (если сможем отследить)
+                clicks_count INTEGER DEFAULT 0,       -- клики на кнопки (ответить/узнать больше)
+
+                -- Временные метки
+                sent_at TIMESTAMPTZ,                  -- когда отправили в канал
+                first_response_at TIMESTAMPTZ,        -- когда первый ответ
+                last_response_at TIMESTAMPTZ,         -- когда последний ответ
+
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+                UNIQUE(challenge_id)  -- один челлендж = одна запись метрик
+            );
+        """)
+
+        # -------- challenge_views -------- (если нужно отслеживать просмотры)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS challenge_views (
+                id SERIAL PRIMARY KEY,
+                challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+                tg_user_id BIGINT NOT NULL,
+                viewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                source VARCHAR(20) DEFAULT 'channel', -- channel/direct/link
+
+                UNIQUE(challenge_id, tg_user_id)  -- один пользователь = один просмотр
+            );
+        """)
+
+        # -------- challenge_clicks -------- (отслеживание кликов по кнопкам)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS challenge_clicks (
+                id SERIAL PRIMARY KEY,
+                challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+                tg_user_id BIGINT NOT NULL,
+                button_type VARCHAR(20) NOT NULL, -- 'answer' / 'learn_more'
+                clicked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+
+        # Индексы для быстрых запросов
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_challenge_metrics_week 
+            ON challenge_metrics(week_type, sent_at DESC);
+        """)
+
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_challenge_metrics_rate 
+            ON challenge_metrics(response_rate DESC, sent_at DESC);
+        """)
+
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_challenge_views_user 
+            ON challenge_views(tg_user_id, viewed_at DESC);
+        """)
+
+        # Добавляем колонку week_type в существующую таблицу challenges (если её нет)
+        await conn.execute("""
+            ALTER TABLE challenges 
+            ADD COLUMN IF NOT EXISTS week_type VARCHAR(20);
+        """)
         await conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_challenge_answers_user
@@ -278,6 +357,251 @@ async def get_user_answers_for_user(tg_user_id: int):
             tg_user_id,
         )
     return rows
+
+
+# ============ МЕТРИКИ ============
+
+async def create_challenge_metric(
+        challenge_id: int,
+        week_type: str,
+        sent_to_count: int = 0
+) -> int:
+    """
+    Создать запись метрик для нового челленджа.
+    """
+    async with get_pool().acquire() as conn:
+        metric_id = await conn.fetchval("""
+            INSERT INTO challenge_metrics 
+            (challenge_id, week_type, sent_to_count, sent_at)
+            VALUES ($1, $2, $3, NOW())
+            RETURNING id
+        """, challenge_id, week_type, sent_to_count)
+    return metric_id
+
+
+async def update_challenge_metric_on_answer(challenge_id: int) -> None:
+    """
+    Обновить метрики челленджа при новом ответе.
+    """
+    async with get_pool().acquire() as conn:
+        # Получаем текущие данные
+        row = await conn.fetchrow("""
+            SELECT 
+                COUNT(ca.id) as new_responses_count,
+                cm.sent_to_count,
+                cm.responses_count as old_responses_count
+            FROM challenge_metrics cm
+            LEFT JOIN challenge_answers ca ON ca.challenge_id = cm.challenge_id
+            WHERE cm.challenge_id = $1
+            GROUP BY cm.sent_to_count, cm.responses_count
+        """, challenge_id)
+
+        if not row:
+            return
+
+        # Обновляем счётчик ответов
+        await conn.execute("""
+            UPDATE challenge_metrics 
+            SET responses_count = $2,
+                updated_at = NOW()
+            WHERE challenge_id = $1
+        """, challenge_id, row['new_responses_count'])
+
+        # Обновляем response_rate если есть sent_to_count
+        if row['sent_to_count'] > 0:
+            response_rate = (row['new_responses_count'] * 100.0) / row['sent_to_count']
+            await conn.execute("""
+                UPDATE challenge_metrics 
+                SET response_rate = $2,
+                    updated_at = NOW()
+                WHERE challenge_id = $1
+            """, challenge_id, round(response_rate, 2))
+
+        # Обновляем временные метки ответов
+        if row['old_responses_count'] == 0:  # Это первый ответ
+            await conn.execute("""
+                UPDATE challenge_metrics 
+                SET first_response_at = NOW(),
+                    updated_at = NOW()
+                WHERE challenge_id = $1
+            """, challenge_id)
+
+        # Всегда обновляем last_response_at
+        await conn.execute("""
+            UPDATE challenge_metrics 
+            SET last_response_at = NOW(),
+                updated_at = NOW()
+            WHERE challenge_id = $1
+        """, challenge_id)
+
+
+async def log_challenge_click(
+        challenge_id: int,
+        tg_user_id: int,
+        button_type: str  # 'answer' или 'learn_more'
+) -> None:
+    """
+    Записать клик по кнопке челленджа.
+    """
+    async with get_pool().acquire() as conn:
+        # Записываем в таблицу кликов
+        await conn.execute("""
+            INSERT INTO challenge_clicks 
+            (challenge_id, tg_user_id, button_type)
+            VALUES ($1, $2, $3)
+        """, challenge_id, tg_user_id, button_type)
+
+        # Обновляем общий счётчик в метриках
+        await conn.execute("""
+            UPDATE challenge_metrics 
+            SET clicks_count = clicks_count + 1,
+                updated_at = NOW()
+            WHERE challenge_id = $1
+        """, challenge_id)
+
+
+async def log_challenge_view(
+        challenge_id: int,
+        tg_user_id: int,
+        source: str = "channel"
+) -> None:
+    """
+    Записать просмотр челленджа пользователем.
+    """
+    async with get_pool().acquire() as conn:
+        # Используем ON CONFLICT для избежания дублей
+        await conn.execute("""
+            INSERT INTO challenge_views 
+            (challenge_id, tg_user_id, source)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (challenge_id, tg_user_id) DO NOTHING
+        """, challenge_id, tg_user_id, source)
+
+        # Обновляем счётчик просмотров в метриках
+        await conn.execute("""
+            UPDATE challenge_metrics 
+            SET views_count = (
+                SELECT COUNT(*) FROM challenge_views 
+                WHERE challenge_id = $1
+            ),
+            updated_at = NOW()
+            WHERE challenge_id = $1
+        """, challenge_id)
+
+
+async def update_sent_to_count(challenge_id: int, sent_to_count: int) -> None:
+    """
+    Обновить количество пользователей, которым отправили челлендж.
+    """
+    async with get_pool().acquire() as conn:
+        await conn.execute("""
+            UPDATE challenge_metrics 
+            SET sent_to_count = $2,
+                updated_at = NOW()
+            WHERE challenge_id = $1
+        """, challenge_id, sent_to_count)
+
+        # Пересчитать response_rate
+        await conn.execute("""
+            UPDATE challenge_metrics 
+            SET response_rate = 
+                CASE 
+                    WHEN $2 > 0 
+                    THEN (responses_count * 100.0) / $2 
+                    ELSE 0 
+                END
+            WHERE challenge_id = $1
+        """, challenge_id, sent_to_count)
+
+
+async def get_challenge_metrics(challenge_id: int):
+    """
+    Получить все метрики для конкретного челленджа.
+    """
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT 
+                cm.*,
+                c.title,
+                c.challenge_date,
+                c.week,
+                COUNT(DISTINCT cv.tg_user_id) as unique_views,
+                COUNT(DISTINCT cc.tg_user_id) as unique_clicks
+            FROM challenge_metrics cm
+            JOIN challenges c ON c.id = cm.challenge_id
+            LEFT JOIN challenge_views cv ON cv.challenge_id = cm.challenge_id
+            LEFT JOIN challenge_clicks cc ON cc.challenge_id = cm.challenge_id
+            WHERE cm.challenge_id = $1
+            GROUP BY cm.id, c.id
+        """, challenge_id)
+    return row
+
+
+async def get_weekly_metrics(week_type: str = None, limit: int = 10):
+    """
+    Получить метрики по неделям или все.
+    """
+    async with get_pool().acquire() as conn:
+        query = """
+            SELECT 
+                cm.*,
+                c.title,
+                c.challenge_date,
+                c.week,
+                RANK() OVER (ORDER BY cm.response_rate DESC) as rank_by_response
+            FROM challenge_metrics cm
+            JOIN challenges c ON c.id = cm.challenge_id
+            WHERE cm.sent_at IS NOT NULL
+        """
+
+        params = []
+        if week_type:
+            query += " AND cm.week_type = $1"
+            params.append(week_type)
+
+        query += " ORDER BY cm.sent_at DESC LIMIT $2"
+        params.append(limit)
+
+        rows = await conn.fetch(query, *params)
+    return rows
+
+
+async def get_overall_stats():
+    """
+    Общая статистика по всем челленджам.
+    """
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT 
+                COUNT(*) as total_challenges,
+                SUM(sent_to_count) as total_reach,
+                SUM(responses_count) as total_responses,
+                AVG(response_rate) as avg_response_rate,
+                SUM(clicks_count) as total_clicks,
+
+                -- По типам недель
+                COUNT(CASE WHEN week_type = 'engagement' THEN 1 END) as engagement_challenges,
+                COUNT(CASE WHEN week_type = 'retention' THEN 1 END) as retention_challenges,
+                COUNT(CASE WHEN week_type = 'conversion' THEN 1 END) as conversion_challenges,
+                COUNT(CASE WHEN week_type = 'reactivation' THEN 1 END) as reactivation_challenges
+            FROM challenge_metrics
+            WHERE sent_at IS NOT NULL
+        """)
+    return row
+
+
+#Функция для преобразования номера недели в тип
+def get_week_type_from_number(week_number: int) -> str:
+    """
+    Преобразовать номер недели цикла в тип недели.
+    """
+    week_type_map = {
+        1: "engagement",  # Неделя 1: Вовлечение
+        2: "retention",  # Неделя 2: Удержание
+        3: "conversion",  # Неделя 3: Конверсия/Продажи
+        4: "reactivation"  # Неделя 4: Реактивация
+    }
+    return week_type_map.get(week_number, "engagement")
 
 
 # ============ SCHEDULE SETTINGS ============

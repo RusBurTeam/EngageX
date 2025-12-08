@@ -6,7 +6,12 @@ from typing import List, Dict, Any, Optional
 
 import asyncpg
 
-from ..db import get_pool, get_community_settings
+from ..db import (
+    get_pool,
+    get_community_settings,
+    create_challenge_metric,
+    get_week_type_from_number
+)
 from .llm import call_model
 
 
@@ -132,28 +137,38 @@ async def generate_range(
 # =================== операции с БД ===================
 
 async def save_generated(
-    challenges: List[Dict[str, Any]],
-    *,
-    week: int,
+        challenges: List[Dict[str, Any]],
+        *,
+        week: int,
+        sent_to_count: int = 0  # 👈 Меняем 100 на 0!
 ) -> List[int]:
+    """
+    Сохранить сгенерированные челленджи.
+    sent_to_count = 0, потому что обновим при отправке из main.py
+    """
     pool = get_pool()
     ids: List[int] = []
 
+    week_type = get_week_type_from_number(week)
+
     async with pool.acquire() as conn:
-        stmt = """
-            INSERT INTO challenges (title, body, challenge_date, week, status)
-            VALUES ($1, $2, $3, $4, 'generated')
-            RETURNING id
-        """
         for ch in challenges:
-            new_id = await conn.fetchval(
-                stmt,
-                ch["title"],
-                ch["body"],
-                ch["challenge_date"],
-                week,
+            # Сохраняем челлендж
+            ch_id = await conn.fetchval("""
+                INSERT INTO challenges (title, body, challenge_date, week, week_type, status)
+                VALUES ($1, $2, $3, $4, $5, 'generated')
+                RETURNING id
+            """, ch["title"], ch["body"], ch["challenge_date"], week, week_type)
+
+            # Создаём метрики с sent_to_count = 0
+            await create_challenge_metric(
+                challenge_id=ch_id,
+                week_type=week_type,
+                sent_to_count=sent_to_count  # 👈 0, а не 100!
             )
-            ids.append(int(new_id))
+
+            ids.append(int(ch_id))
+
     return ids
 
 
@@ -189,8 +204,7 @@ async def get_challenge_by_id(ch_id: int) -> Optional[asyncpg.Record]:
 async def mark_challenge_sent(ch_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
+        await conn.execute("""
             UPDATE challenges
             SET status = 'sent',
                 sent_at = NOW(),
@@ -199,6 +213,56 @@ async def mark_challenge_sent(ch_id: int) -> None:
             """,
             ch_id,
         )
+
+        await conn.execute("""
+            UPDATE challenge_metrics 
+            SET sent_at = NOW(),
+                updated_at = NOW()
+            WHERE challenge_id = $1
+            """,
+            ch_id
+        )
+
+
+async def get_detailed_analytics(limit: int = 10) -> List[asyncpg.Record]:
+    """
+    Детальная аналитика с метриками.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT 
+                c.id,
+                c.title,
+                c.challenge_date,
+                c.week,
+                c.week_type,
+                c.sent_at,
+
+                -- Метрики
+                cm.sent_to_count,
+                cm.responses_count,
+                cm.response_rate,
+                cm.views_count,
+                cm.clicks_count,
+                cm.first_response_at,
+                cm.last_response_at,
+
+                -- Дополнительная статистика
+                COUNT(DISTINCT ca.tg_user_id) as unique_responders,
+                AVG(LENGTH(ca.answer_text)) as avg_answer_length
+
+            FROM challenges c
+            LEFT JOIN challenge_metrics cm ON cm.challenge_id = c.id
+            LEFT JOIN challenge_answers ca ON ca.challenge_id = c.id
+            WHERE c.status = 'sent'
+            GROUP BY c.id, cm.id
+            ORDER BY c.sent_at DESC NULLS LAST
+            LIMIT $1;
+            """,
+                                limit,
+                                )
+    return rows
 
 
 async def delete_challenge(ch_id: int) -> None:

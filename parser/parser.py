@@ -72,7 +72,7 @@ def load_channels_from_config():
     except FileNotFoundError:
         # fallback — один канал из .env или дефолтный
         ch = os.getenv("TG_CHANNEL_USERNAME", "toncoin_rus")
-        print(f"⚠️ channels.json не найден, используем один канал: {ch}")
+        print(f"channels.json не найден, используем один канал: {ch}")
         return [ch]
 
     if isinstance(data, dict) and "channels" in data and isinstance(data["channels"], list):
@@ -92,15 +92,15 @@ class DatabaseManager:
     async def connect(self):
         try:
             self.connection = await asyncpg.connect(**self.config)
-            print("✅ Подключение к PostgreSQL установлено")
+            print("Подключение к PostgreSQL установлено")
         except Exception as e:
-            print(f"❌ Ошибка подключения к PostgreSQL: {e}")
+            print(f"Ошибка подключения к PostgreSQL: {e}")
             raise
 
     async def disconnect(self):
         if self.connection:
             await self.connection.close()
-            print("🔌 Соединение с PostgreSQL закрыто")
+            print("Соединение с PostgreSQL закрыто")
 
     async def init_database(self):
         """
@@ -170,10 +170,10 @@ class DatabaseManager:
                 )
             ''')
 
-            print("✅ Таблицы в PostgreSQL инициализированы (без лишних колонок в posts)")
+            print("Таблицы в PostgreSQL инициализированы (без лишних колонок в posts)")
 
         except Exception as e:
-            print(f"❌ Ошибка инициализации БД: {e}")
+            print(f"Ошибка инициализации БД: {e}")
             raise
 
     async def save_post(self, channel_username, post_data):
@@ -209,7 +209,7 @@ class DatabaseManager:
             return post_db_id
 
         except Exception as e:
-            print(f"❌ Ошибка сохранения поста: {e}")
+            print(f"Ошибка сохранения поста: {e}")
             return None
 
     async def save_clean_post(self, source_post_id: int, channel_username: str, raw_text: str):
@@ -226,7 +226,7 @@ class DatabaseManager:
             ''', source_post_id, channel_username, cleaned)
 
         except Exception as e:
-            print(f"❌ Ошибка сохранения clean_post: {e}")
+            print(f"Ошибка сохранения clean_post: {e}")
             raise
 
     async def save_reactions(self, post_db_id, channel_username, reactions_dict):
@@ -240,9 +240,9 @@ class DatabaseManager:
                     VALUES ($1, $2, $3, $4)
                 ''', post_db_id, channel_username, reaction_type, count)
 
-            print(f"💾 Сохранено {len(reactions_dict)} типов реакций")
+            print(f"Сохранено {len(reactions_dict)} типов реакций")
         except Exception as e:
-            print(f"❌ Ошибка сохранения реакций: {e}")
+            print(f"Ошибка сохранения реакций: {e}")
             raise
 
     async def save_comments(self, post_db_id, channel_username, comments_list):
@@ -259,9 +259,9 @@ class DatabaseManager:
                 ''', post_db_id, channel_username, comment_text, datetime.now())
                 saved += 1
 
-            print(f"💾 Сохранено {saved} комментариев.")
+            print(f"Сохранено {saved} комментариев.")
         except Exception as e:
-            print(f"❌ Ошибка сохранения комментариев: {e}")
+            print(f"Ошибка сохранения комментариев: {e}")
             raise
 
     async def update_ingest_status(self, post_db_id: int, status: str):
@@ -273,7 +273,7 @@ class DatabaseManager:
                 post_db_id
             )
         except Exception as e:
-            print(f"❌ Ошибка обновления ingest_status для post_id={post_db_id}: {e}")
+            print(f"Ошибка обновления ingest_status для post_id={post_db_id}: {e}")
 
     async def get_done_post_ids(self, channel_username: str):
         """
@@ -296,7 +296,7 @@ class DatabaseManager:
                 GROUP BY ingest_status
                 ORDER BY ingest_status
             ''')
-            print("\n📈 Статусы парсинга постов (posts.ingest_status):")
+            print("\nСтатусы парсинга постов (posts.ingest_status):")
             if not rows:
                 print("   (таблица posts пуста)")
                 return
@@ -305,7 +305,7 @@ class DatabaseManager:
                 cnt = row["cnt"]
                 print(f"   {status:>7}: {cnt}")
         except Exception as e:
-            print(f"❌ Ошибка аналитики статуса постов: {e}")
+            print(f"Ошибка аналитики статуса постов: {e}")
 
 
 async def parse_single_channel(db: DatabaseManager, client: TelegramClient, channel_username: str):
@@ -320,20 +320,20 @@ async def parse_single_channel(db: DatabaseManager, client: TelegramClient, chan
       * реакции,
       * комментарии (ошибки по комментариям не ломают пост).
     """
-    print(f"\n🔍 Анализируем канал: @{channel_username}")
+    print(f"\nАнализируем канал: @{channel_username}")
 
     channel = await client.get_entity(channel_username)
 
     # Загружаем уже полностью обработанные посты (ingest_status = 'done')
     done_ids = await db.get_done_post_ids(channel_username)
-    print(f"ℹ️ Уже обработано (ingest_status='done'): {len(done_ids)} постов")
+    print(f"Уже обработано (ingest_status='done'): {len(done_ids)} постов")
 
     total_posts = 0
     total_comments = 0
     total_reactions = 0
     processed_new = 0
 
-    print("📥 Собираем посты (полная история, от старых к новым)...")
+    print("Собираем посты (полная история, от старых к новым)...")
 
     async for message in client.iter_messages(
         channel,
@@ -385,13 +385,13 @@ async def parse_single_channel(db: DatabaseManager, client: TelegramClient, chan
             processed_new += 1
 
             print(
-                f"✅ Пост {message.id}: "
+                f"Пост {message.id}: "
                 f"{post_comments_count} коммент., {post_reactions_count} реакц. "
                 f"[ingest_status={post_status}]"
             )
 
         except Exception as e:
-            print(f"❌ Ошибка при обработке поста {message.id}: {e}")
+            print(f"Ошибка при обработке поста {message.id}: {e}")
 
         finally:
             # Если хотя бы пост в posts создан — отмечаем его статус
@@ -400,10 +400,10 @@ async def parse_single_channel(db: DatabaseManager, client: TelegramClient, chan
 
     print("\n" + "-" * 60)
     print(f"📊 ИТОГИ КАНАЛА @{channel_username}:")
-    print(f"📄 Обработано новых/проблемных постов: {processed_new}")
-    print(f"📄 Всего просмотрено постов (без учёта уже done): {total_posts}")
-    print(f"💬 Комментариев сохранено: {total_comments}")
-    print(f"🎭 Реакций сохранено: {total_reactions}")
+    print(f"Обработано новых/проблемных постов: {processed_new}")
+    print(f"Всего просмотрено постов (без учёта уже done): {total_posts}")
+    print(f"Комментариев сохранено: {total_comments}")
+    print(f"Реакций сохранено: {total_reactions}")
     print("-" * 60)
 
 
@@ -414,7 +414,7 @@ async def parse_channel_to_postgres():
     try:
         channels = load_channels_from_config()
 
-        print("📚 Каналы из конфигурации (после нормализации):")
+        print("Каналы из конфигурации (после нормализации):")
         for c in channels:
             print(f"   - @{c}")
 
@@ -431,17 +431,17 @@ async def parse_channel_to_postgres():
                 print("==============================")
                 await parse_single_channel(db, client, ch)
             except Exception as e:
-                print(f"❌ Ошибка при обработке канала @{ch}: {e}")
+                print(f"Ошибка при обработке канала @{ch}: {e}")
 
         # После обхода всех каналов — выводим аналитику по ingest_status
         print("\n📊 Сводка по полю posts.ingest_status после парсинга:")
         await db.print_ingest_status_stats()
 
         await client.disconnect()
-        print("\n✅ Парсинг всех каналов завершён")
+        print("\nПарсинг всех каналов завершён")
 
     except Exception as e:
-        print(f"❌ Общая ошибка верхнего уровня: {e}")
+        print(f"Общая ошибка верхнего уровня: {e}")
     finally:
         await db.disconnect()
 
@@ -500,6 +500,6 @@ async def extract_comments_as_strings(client, channel, message):
 
 
 if __name__ == "__main__":
-    print("🚀 Запуск парсера Telegram с сохранением в PostgreSQL")
-    print(f"⚙️  Настройки: {POSTS_LIMIT} постов, до {COMMENTS_LIMIT_PER_POST} комментариев на пост")
+    print("Запуск парсера Telegram с сохранением в PostgreSQL")
+    print(f"Настройки: {POSTS_LIMIT} постов, до {COMMENTS_LIMIT_PER_POST} комментариев на пост")
     asyncio.run(parse_channel_to_postgres())

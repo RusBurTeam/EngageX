@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart, BaseFilter
+from aiogram.filters import Command
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -23,6 +24,8 @@ from ..db import (
     update_current_week,
     get_schedule_settings,
     set_schedule_mode,
+    get_weekly_metrics,
+    get_overall_stats
 )
 from ..services.challenges import (
     generate_range,
@@ -786,3 +789,47 @@ async def cb_admin_analytics(callback: CallbackQuery) -> None:
     text = "\n".join(lines)
     await callback.message.edit_text(text, reply_markup=admin_main_kb())
     await callback.answer()
+
+
+@router.message(Command("metrics"), AdminFilter())
+async def cmd_metrics(message: Message):
+    """Показать метрики челленджей."""
+    try:
+        # Получаем статистику
+        stats = await get_overall_stats()
+        recent_metrics = await get_weekly_metrics(limit=5)
+
+        # Формируем ответ
+        text = "📊 <b>Метрики системы</b>\n\n"
+
+        if stats:
+            text += f"• Всего челленджей: {stats['total_challenges']}\n"
+            text += f"• Общий охват: {stats['total_reach']} пользователей\n"
+            text += f"• Всего ответов: {stats['total_responses']}\n"
+            text += f"• Средний % ответов: {stats['avg_response_rate']:.1f}%\n"
+            text += f"• Всего кликов: {stats['total_clicks']}\n\n"
+
+        text += "📈 <b>По типам недель:</b>\n"
+        if stats:
+            text += f"• Вовлечение: {stats['engagement_challenges']}\n"
+            text += f"• Удержание: {stats['retention_challenges']}\n"
+            text += f"• Конверсия: {stats['conversion_challenges']}\n"
+            text += f"• Реактивация: {stats['reactivation_challenges']}\n\n"
+
+        text += "🏆 <b>Последние 5 челленджей:</b>\n"
+        for metric in recent_metrics:
+            if metric.get('title'):  # Добавляем проверку на наличие данных
+                text += f"\n• {metric['title']}\n"
+                text += f"  Дата: {metric['challenge_date']}\n"
+                text += f"  Ответов: {metric['responses_count']}"
+                if metric.get('sent_to_count'):
+                    text += f"/{metric['sent_to_count']}"
+                if metric.get('response_rate'):
+                    text += f" ({metric['response_rate']:.1f}%)\n"
+                else:
+                    text += "\n"
+
+        await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка при получении метрик: {e}")

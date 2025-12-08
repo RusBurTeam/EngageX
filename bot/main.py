@@ -17,6 +17,7 @@ from .db import (
     get_schedule_settings,
     set_schedule_last_auto_date,
     get_community_settings,
+    update_sent_to_count
 )
 from .handlers import admin as admin_handlers
 from .handlers import user as user_handlers
@@ -33,6 +34,27 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+
+async def get_real_members_count(bot: Bot, channel_id: str) -> int:
+    """
+    Получить реальное количество участников канала.
+    Работает, потому что бот - администратор канала.
+    """
+    try:
+        # Получаем информацию о чате/канале
+        chat = await bot.get_chat(channel_id)
+
+        # У каналов и супергрупп есть members_count
+        if hasattr(chat, 'members_count') and chat.members_count:
+            logging.info(f"Реальное количество подписчиков: {chat.members_count}")
+            return chat.members_count
+        else:
+            logging.warning(f"Не удалось получить members_count для {channel_id}")
+            return 150  # fallback
+
+    except Exception as e:
+        logging.error(f"Ошибка получения количества участников: {e}")
+        return 150  # fallback на случай ошибки
 
 async def auto_poster_worker(bot: Bot) -> None:
     """Фоновая задача для автоматической публикации челленджей."""
@@ -89,6 +111,11 @@ async def auto_poster_worker(bot: Bot) -> None:
                 continue
 
             ch_id = int(ch["id"])
+
+            # Получаем количество подписчиков
+            real_members_count = await get_real_members_count(bot, CHANNEL_CHAT)
+            logging.info(f"Канал {CHANNEL_CHAT}: {real_members_count} подписчиков")
+
             text = (
                 f"💪 <b>{ch['title']}</b>\n\n"
                 f"{ch['body']}\n\n"
@@ -126,6 +153,10 @@ async def auto_poster_worker(bot: Bot) -> None:
 
             await bot.send_message(CHANNEL_CHAT, text, reply_markup=kb)
             await mark_challenge_sent(ch_id)
+
+            await update_sent_to_count(ch_id, real_members_count)
+            logging.info(f"Челлендж {ch_id}: охват {real_members_count} пользователей")
+
             await set_schedule_last_auto_date(today)
         except Exception:
             logging.exception("Ошибка в авто-постинге челленджей")
