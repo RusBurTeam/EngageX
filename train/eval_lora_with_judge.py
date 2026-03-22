@@ -1,5 +1,4 @@
-# train/eval_lora_with_judge.py
-# Сравнение качества: черновик vs teacher vs LoRA-выход по метрике judge_quality_llm
+
 
 import os
 import sys
@@ -13,53 +12,34 @@ from peft import PeftModel
 from dotenv import load_dotenv
 import pathlib
 
-# --- базовые пути ---
 BASE_DIR = str(pathlib.Path(__file__).resolve().parents[1])
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# Путь к валидному датасету:
-# 1) WRITER_VAL_PATH из .env
-# 2) дефолт: data/writer_rewrite_val.jsonl (старый формат тоже поддерживаем)
 VAL_PATH = (
     os.getenv("WRITER_VAL_PATH")
     or os.path.join(BASE_DIR, "data", "writer_rewrite_val.jsonl")
 )
 
-# Лимит примеров на прогон, по умолчанию 10
 VAL_LIMIT = int(os.getenv("WRITER_VAL_LIMIT", "10"))
 
-# Фильтр по типу сэмплов: all | post | challenge
 SAMPLE_TYPE_FILTER = os.getenv("WRITER_SAMPLE_TYPE", "all").strip().lower()
 if SAMPLE_TYPE_FILTER not in ("all", "post", "challenge"):
     SAMPLE_TYPE_FILTER = "all"
 
-# Базовая директория, где лежат чекпоинты LoRA-писателя
 LORA_BASE_DIR = os.path.join(BASE_DIR, "checkpoints", "lora_writer_qwen2_5_7b")
 
-# наш loader базовой Qwen
 from Models.qwen_loader import load_tokenizer_model
 
-# judge-модель и инференс
 from analytics.judge_quality_llm import (
     infer_batch as judge_infer_batch,
     ensure_model as judge_ensure_model,
 )
 
-
-# --------- утилита: вытащить черновик из user-контента ---------
 def extract_draft_from_user(user_content: str) -> str:
-    """
-    Старый формат:
-      "Вот черновик поста:\\n\"\"\"\\n...ТЕКСТ...\\n\"\"\"\\n\\nПерепиши..."
-    Новый формат (посты/челленджи):
-      просто бриф без черновика.
-    Логика:
-      – если есть блок между \"\"\" ... \"\"\" — считаем это черновиком;
-      – иначе возвращаем весь user_content.
-    """
+    """Extract draft from user."""
     m = re.search(r'"""(.*?)"""', user_content, flags=re.S)
     if m:
         draft = m.group(1).strip()
@@ -67,8 +47,6 @@ def extract_draft_from_user(user_content: str) -> str:
             return draft
     return user_content.strip()
 
-
-# --------- загрузка валидации ---------
 def load_val_examples(limit: int) -> List[Dict[str, Any]]:
     if not os.path.exists(VAL_PATH):
         raise FileNotFoundError(f"Не найден val-датасет: {VAL_PATH}")
@@ -89,7 +67,6 @@ def load_val_examples(limit: int) -> List[Dict[str, Any]]:
                 continue
             obj = json.loads(line)
 
-            # Если есть поле sample_type и включён фильтр
             if SAMPLE_TYPE_FILTER != "all" and "sample_type" in obj:
                 st = str(obj.get("sample_type", "")).lower()
                 if st != SAMPLE_TYPE_FILTER:
@@ -97,7 +74,7 @@ def load_val_examples(limit: int) -> List[Dict[str, Any]]:
 
             msgs = obj.get("messages", [])
             if len(msgs) < 3:
-                # ожидаем system, user, assistant
+
                 continue
 
             system_msg = msgs[0].get("content", "")
@@ -126,19 +103,9 @@ def load_val_examples(limit: int) -> List[Dict[str, Any]]:
     )
     return examples
 
-
-# --------- поиск директории с LoRA-адаптерами ---------
 def resolve_lora_dir() -> str:
-    """
-    Находим директорию, где реально лежит adapter_config.json LoRA-писателя.
+    """Resolve lora dir."""
 
-    Приоритет:
-    1) Переменная окружения LORA_WRITER (если путь существует и там есть adapter_config.json).
-    2) Прямо в LORA_BASE_DIR.
-    3) Любая поддиректория LORA_BASE_DIR/*, где есть adapter_config.json.
-       Берём самую "позднюю" по имени (часто это последний checkpoint).
-    """
-    # 1) .env / окружение
     env_dir = os.getenv("LORA_WRITER")
     if env_dir:
         env_dir = os.path.abspath(env_dir)
@@ -153,7 +120,6 @@ def resolve_lora_dir() -> str:
                 f"[{datetime.now().isoformat()}] ⚠️ В LORA_WRITER нет adapter_config.json: {cfg}"
             )
 
-    # 2) Прямо в LORA_BASE_DIR
     base_cfg = os.path.join(LORA_BASE_DIR, "adapter_config.json")
     if os.path.exists(base_cfg):
         print(
@@ -161,7 +127,6 @@ def resolve_lora_dir() -> str:
         )
         return LORA_BASE_DIR
 
-    # 3) Поиск в поддиректориях (checkpoint-1, checkpoint-12 и т.п.)
     candidates = []
     if os.path.isdir(LORA_BASE_DIR):
         for name in sorted(os.listdir(LORA_BASE_DIR)):
@@ -188,8 +153,6 @@ def resolve_lora_dir() -> str:
     ]
     raise FileNotFoundError("\n".join(msg_lines))
 
-
-# --------- генерация с LoRA-писателем ---------
 def load_writer_lora():
     print(f"[{datetime.now().isoformat()}] 🔄 Загружаем базовую модель + LoRA-Writer...")
     tokenizer, base_model = load_tokenizer_model()
@@ -208,7 +171,6 @@ def load_writer_lora():
     lora_model.eval()
     print(f"[{datetime.now().isoformat()}] ✅ LoRA подключена. device = {device}")
     return tokenizer, lora_model, device
-
 
 def generate_with_lora(
     tokenizer,
@@ -256,19 +218,13 @@ def generate_with_lora(
     text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     return text.strip()
 
-
-# --------- оценка через judge_quality_llm ---------
 def evaluate_with_judge(drafts: List[str], refs: List[str], loras: List[str]):
-    """
-    Прогоняем все три группы через judge_quality_llm и считаем средние score.
-    Плюс выводим несколько примеров (teacher vs LoRA).
-    """
-    judge_ensure_model()  # грузим модель-судью
+    """Evaluate with judge."""
+    judge_ensure_model()
 
     items = []
-    kind_idx = []  # чтобы помнить, какой текст какого типа
+    kind_idx = []
 
-    # 0 = draft, 1 = ref, 2 = lora
     pid = 1
     for d in drafts:
         items.append(
@@ -333,12 +289,10 @@ def evaluate_with_judge(drafts: List[str], refs: List[str], loras: List[str]):
             f"[{datetime.now().isoformat()}] ⚠️ Ожидалось {3*n} результатов от judge, получено {len(results)}."
         )
 
-    # разбиваем результаты на три блока
     res_draft = results[0:n]
     res_ref = results[n : 2 * n]
     res_lora = results[2 * n : 3 * n]
 
-    # собираем по типам (для средних значений)
     sums = {0: 0.0, 1: 0.0, 2: 0.0}
     counts = {0: n, 1: n, 2: n}
 
@@ -354,7 +308,6 @@ def evaluate_with_judge(drafts: List[str], refs: List[str], loras: List[str]):
         for k in sums.keys()
     }
 
-    # кто выиграл
     label_map = {0: "draft", 1: "teacher", 2: "lora"}
     best_k = max(avg, key=avg.get)
     best_label = label_map[best_k]
@@ -370,7 +323,6 @@ def evaluate_with_judge(drafts: List[str], refs: List[str], loras: List[str]):
     )
     print("===========================================\n")
 
-    # ------ Примеры для просмотра (teacher vs LoRA) ------
     max_examples = min(3, n)
     if max_examples > 0:
         print("------ Примеры вывода (teacher vs LoRA) ------")
@@ -387,7 +339,6 @@ def evaluate_with_judge(drafts: List[str], refs: List[str], loras: List[str]):
         ref_text = refs[i].strip()
         lora_text = loras[i].strip()
 
-        # чтобы не спамить консоль — режем по ~600 символов
         def cut(t: str, max_len: int = 600) -> str:
             return t if len(t) <= max_len else t[:max_len] + "...\n[обрезано]"
 
@@ -399,7 +350,6 @@ def evaluate_with_judge(drafts: List[str], refs: List[str], loras: List[str]):
 
     if max_examples > 0:
         print("\n------ Конец примеров ------\n")
-
 
 def main():
     print(f"[{datetime.now().isoformat()}] 🔍 Тестируем LoRA-Writer на val + judge_quality_llm")
@@ -443,7 +393,6 @@ def main():
             )
 
     evaluate_with_judge(drafts, refs, loras)
-
 
 if __name__ == "__main__":
     try:

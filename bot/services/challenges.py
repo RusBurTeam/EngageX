@@ -1,8 +1,7 @@
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import asyncpg
 
@@ -11,32 +10,23 @@ from .llm import call_model
 
 
 def _parse_title_body(raw: str) -> Dict[str, str]:
-    """
-    Парсим ответ модели в заголовок/тело.
-
-    Поддерживает:
-    1) "Заголовок: ...\nТекст: ...\n..."
-    2) "# Заголовок\n\nТекст..."
-    3) первая строка — заголовок, остальное — текст
-    """
+    """Parse model output into title/body fields."""
     text = (raw or "").strip()
     if not text:
         return {
-            "title": "Челлендж",
-            "body": "Описание челленджа не удалось распарсить.",
+            "title": "Challenge",
+            "body": "Challenge description could not be parsed.",
         }
 
     lines = text.splitlines()
-
     title = ""
     body_lines: List[str] = []
 
     for line in lines:
         low = line.lower().strip()
-        if low.startswith("заголовок:"):
+        if low.startswith("title:"):
             title = line.split(":", 1)[1].strip()
-        elif low.startswith("текст:"):
-            # всё, что после "Текст:" и дальше, считаем телом
+        elif low.startswith("text:"):
             part = line.split(":", 1)[1].strip()
             if part:
                 body_lines.append(part)
@@ -50,7 +40,7 @@ def _parse_title_body(raw: str) -> Dict[str, str]:
         body_lines = lines[1:]
 
     body = "\n".join(body_lines).strip()
-    return {"title": title, "body": body}
+    return {"title": title or "Challenge", "body": body or text}
 
 
 async def _generate_single(
@@ -62,28 +52,28 @@ async def _generate_single(
     community_name: str,
 ) -> Dict[str, Any]:
     system_msg = (
-        "Ты — ИИ-модератор онлайн-фитнес-сообщества. "
-        "Генерируешь ежедневные челленджи (вызовы) для повышения вовлечённости. "
-        "Пиши по-русски."
+        "You are an AI community moderator for an online fitness group. "
+        "Generate daily challenges that increase engagement. "
+        "Write in English."
     )
 
     user_lines = [
-        f"Сообщество: {community_name}",
-        f"Тематика: {topic}",
-        f"Неделя цикла: {week}",
-        f"Продукт/сервис: {product}",
-        f"Тональность: {tone}",
+        f"Community: {community_name}",
+        f"Topic: {topic}",
+        f"Cycle week: {week}",
+        f"Product/service: {product}",
+        f"Tone: {tone}",
         "",
-        f"Нужно сгенерировать челлендж на дату: {target_date.isoformat()}",
+        f"Generate one challenge for date: {target_date.isoformat()}",
         "",
-        "Требования:",
-        "- мотивирует участника сделать конкретное действие;",
-        "- выполним за один день;",
-        "- без токсичности, поддерживающе.",
+        "Requirements:",
+        "- Encourage the participant to do a concrete action;",
+        "- Must be doable within one day;",
+        "- Keep a supportive non-toxic tone.",
         "",
-        "Формат ответа:",
-        "Заголовок: <короткий заголовок>",
-        "Текст: <3–7 предложений с объяснением челленджа>",
+        "Output format:",
+        "Title: <short title>",
+        "Text: <3-7 concise sentences>",
     ]
 
     raw = await call_model(
@@ -111,9 +101,7 @@ async def generate_range(
     tone: str,
     community_name: str,
 ) -> List[Dict[str, Any]]:
-    """
-    Генерация диапазона челленджей от start_date включительно на days дней.
-    """
+    """Generate a sequence of challenges for a date range."""
     result: List[Dict[str, Any]] = []
     for i in range(days):
         d = start_date + timedelta(days=i)
@@ -129,13 +117,7 @@ async def generate_range(
     return result
 
 
-# =================== операции с БД ===================
-
-async def save_generated(
-    challenges: List[Dict[str, Any]],
-    *,
-    week: int,
-) -> List[int]:
+async def save_generated(challenges: List[Dict[str, Any]], *, week: int) -> List[int]:
     pool = get_pool()
     ids: List[int] = []
 
@@ -204,13 +186,8 @@ async def mark_challenge_sent(ch_id: int) -> None:
 async def delete_challenge(ch_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM challenges WHERE id = $1;",
-            ch_id,
-        )
+        await conn.execute("DELETE FROM challenges WHERE id = $1;", ch_id)
 
-
-# =================== Q&A по челленджу ===================
 
 async def generate_more_about_challenge_text(ch) -> str:
     title = ch["title"]
@@ -218,21 +195,21 @@ async def generate_more_about_challenge_text(ch) -> str:
     ch_date = ch["challenge_date"]
 
     system_msg = (
-        "Ты — фитнес-коуч и психолог. "
-        "Объясни челлендж простым языком, поддерживающе, без токсичности."
+        "You are a supportive fitness coach. "
+        "Explain the challenge in a simple and practical way."
     )
 
     user_lines = [
-        f"Дата челленджа: {ch_date.isoformat()}",
-        f"Заголовок: {title}",
+        f"Challenge date: {ch_date.isoformat()}",
+        f"Title: {title}",
         "",
-        "Текст челленджа:",
+        "Challenge text:",
         body,
         "",
-        "Нужно написать пояснение:",
-        "- кому он подойдёт;",
-        "- какую пользу даёт;",
-        "- 3–5 конкретных шагов на сегодня.",
+        "Provide:",
+        "- who this challenge is for;",
+        "- expected benefit;",
+        "- 3-5 clear action steps for today.",
     ]
 
     raw = await call_model(
@@ -246,9 +223,8 @@ async def generate_more_about_challenge_text(ch) -> str:
 
 async def generate_challenge_qa_answer(ch: dict, question: str) -> str:
     system_msg = (
-        "Ты — поддерживающий фитнес-коуч. "
-        "Отвечай на вопросы по челленджу коротко, по делу и дружелюбно. "
-        "Говори на «ты», 3–7 предложений."
+        "You are a supportive fitness coach. "
+        "Answer challenge-related questions briefly and clearly in 3-7 sentences."
     )
 
     title = ch.get("title") or ""
@@ -256,12 +232,12 @@ async def generate_challenge_qa_answer(ch: dict, question: str) -> str:
     ch_date = ch.get("challenge_date")
 
     user_lines = [
-        "Челлендж:",
-        f"Дата: {ch_date.isoformat() if hasattr(ch_date, 'isoformat') else ch_date}",
-        f"Заголовок: {title}",
-        f"Текст: {body}",
+        "Challenge:",
+        f"Date: {ch_date.isoformat() if hasattr(ch_date, 'isoformat') else ch_date}",
+        f"Title: {title}",
+        f"Text: {body}",
         "",
-        "Вопрос участника:",
+        "Participant question:",
         question,
     ]
 
@@ -275,9 +251,7 @@ async def generate_challenge_qa_answer(ch: dict, question: str) -> str:
 
 
 async def update_challenge_text(ch_id: int, title: str, body: str) -> None:
-    """
-    Ручное обновление заголовка и текста челленджа.
-    """
+    """Update challenge title and body."""
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -295,15 +269,7 @@ async def update_challenge_text(ch_id: int, title: str, body: str) -> None:
 
 
 async def regenerate_challenge(ch_id: int) -> Dict[str, Any]:
-    """
-    Перегенерация челленджа через модель с учётом текущих настроек сообщества.
-
-    1. Берём дату и week из существующей записи.
-    2. Подтягиваем community_settings (topic, product, tone, community_name).
-    3. Генерируем новый текст.
-    4. Обновляем запись в БД.
-    5. Возвращаем словарь с новыми полями.
-    """
+    """Regenerate one challenge while keeping its date/week."""
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -341,9 +307,7 @@ async def regenerate_challenge(ch_id: int) -> Dict[str, Any]:
 
 
 async def get_challenge_for_date(ch_date: date) -> Optional[asyncpg.Record]:
-    """
-    Берём первый ещё не отправленный челлендж на конкретную дату.
-    """
+    """Return first unsent challenge for a specific date."""
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -361,9 +325,7 @@ async def get_challenge_for_date(ch_date: date) -> Optional[asyncpg.Record]:
 
 
 async def get_analytics(limit: int = 10) -> List[asyncpg.Record]:
-    """
-    Простая аналитика: последние отправленные челленджи + количество ответов.
-    """
+    """Return aggregate challenge analytics."""
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -384,10 +346,10 @@ async def get_analytics(limit: int = 10) -> List[asyncpg.Record]:
             limit,
         )
     return rows
+
+
 async def update_challenge_date(ch_id: int, new_date: date) -> None:
-    """
-    Обновить дату публикации челленджа.
-    """
+    """Update challenge date."""
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -403,9 +365,7 @@ async def update_challenge_date(ch_id: int, new_date: date) -> None:
 
 
 async def update_challenge_week(ch_id: int, new_week: int) -> None:
-    """
-    Обновить номер недели цикла для челленджа.
-    """
+    """Update challenge cycle week."""
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(

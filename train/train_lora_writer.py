@@ -1,19 +1,4 @@
-# train/train_lora_writer.py
-# Обучение LoRA для "писателя" на Qwen2.5-7B-Instruct
-# по датасету, экспортированному из writer_challenges.
-#
-# Формат строки в JSONL (writer_train.jsonl):
-# {
-#   "messages": [
-#       {"role": "system", "content": WRITER_SYSTEM_MSG},
-#       {"role": "user", "content": "Канал: ...\nЦель недели: ...\nСтиль: ...\n..."},
-#       {"role": "assistant", "content": "<финальный текст челленджа>"}
-#   ]
-# }
-#
-# Стиль уже зашит в user-промпт строкой "Стиль: ...", поэтому
-# отдельно поле style здесь не нужно — мы просто учим модель
-# на этих диалогах.
+
 
 import os
 import sys
@@ -33,34 +18,25 @@ from transformers import (
 from dotenv import load_dotenv
 import pathlib
 
-# ================== БАЗОВЫЕ ПУТИ ==================
 BASE_DIR = str(pathlib.Path(__file__).resolve().parents[1])
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# ======== РЕЖИМ ОБУЧЕНИЯ: safe / max_vram ========
 TRAIN_MODE = os.getenv("WRITER_TRAIN_MODE", "safe").lower()
 if TRAIN_MODE not in ("safe", "max_vram"):
     TRAIN_MODE = "safe"
 
-# ======== Путь к датасету ========
-# Приоритет:
-# 1) WRITER_DATASET_PATH
-# 2) WRITER_DATA_PATH (старое имя)
-# 3) дефолт: ./data/writer_train.jsonl (совпадает с экспортом)
 DATA_PATH = (
     os.getenv("WRITER_DATASET_PATH")
     or os.getenv("WRITER_DATA_PATH")
     or os.path.join(BASE_DIR, "data", "writer_train.jsonl")
 )
 
-# ======== Путь к локальной модели Qwen ========
 DEFAULT_LOCAL_QWEN = os.path.join(BASE_DIR, "Models", "qwen2.5-7b-instruct")
 BASE_MODEL = os.getenv("QWEN_LOCAL_PATH", DEFAULT_LOCAL_QWEN)
 
-# ======== Куда сохраняем LoRA ========
 OUTPUT_DIR = os.getenv(
     "LORA_WRITER_OUTPUT",
     os.path.join(BASE_DIR, "checkpoints", "lora_writer_qwen2_5_7b"),
@@ -78,7 +54,6 @@ print("=====================================\n")
 if not os.path.exists(DATA_PATH):
     raise FileNotFoundError(f"Не найден датасет: {DATA_PATH}")
 
-# ================== ЗАГРУЗАЕМ ДАТАСЕТ ==================
 print(f"[{datetime.now().isoformat()}] 📂 Загружаем датасет...")
 raw_dataset = load_dataset(
     "json",
@@ -92,7 +67,6 @@ print(f"[{datetime.now().isoformat()}] 📊 Всего train-сэмплов: {fu
 if full_len == 0:
     raise RuntimeError("Датасет пуст. Проверь writer_train.jsonl.")
 
-# ================== ЗАГРУЗКА ТОКЕНАЙЗЕРА И МОДЕЛИ ==================
 print(f"[{datetime.now().isoformat()}] 🔄 Загружаем токенайзер и модель...")
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -105,7 +79,6 @@ if tokenizer.pad_token is None:
 
 pad_id = tokenizer.pad_token_id
 
-# 4-bit QLoRA под 3090: считаем в float16
 quant_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_use_double_quant=True,
@@ -122,11 +95,9 @@ model = AutoModelForCausalLM.from_pretrained(
 
 model = prepare_model_for_kbit_training(model)
 
-# Немного конфигурации
 model.config.pad_token_id = pad_id
-model.config.use_cache = False  # чтобы Trainer не ругался, нормально для тренировки
+model.config.use_cache = False
 
-# ================== LoRA ==================
 lora_config = LoraConfig(
     r=16,
     lora_alpha=32,
@@ -147,17 +118,10 @@ lora_config = LoraConfig(
 model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
 
-# ================== ТОКЕНИЗАЦИЯ ==================
 MAX_LEN = int(os.getenv("WRITER_MAX_LEN", "1024"))
 
-
 def tokenize_fn(example: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Берём уже собранный список messages (system + user + assistant),
-    применяем chat_template и токенизируем.
-    Стиль уже присутствует внутри user-сообщения в виде строки "Стиль: ...",
-    поэтому здесь дополнительно ничего добавлять не нужно.
-    """
+    """Tokenize fn."""
     messages = example["messages"]
 
     text = tokenizer.apply_chat_template(
@@ -174,10 +138,8 @@ def tokenize_fn(example: Dict[str, Any]) -> Dict[str, Any]:
         return_attention_mask=True,
     )
 
-    # Для SFT: предсказываем весь текст
     enc["labels"] = enc["input_ids"].copy()
     return enc
-
 
 print(f"[{datetime.now().isoformat()}] ✂️ Токенизируем датасет...")
 tokenized_train = train_dataset.map(
@@ -186,20 +148,17 @@ tokenized_train = train_dataset.map(
     remove_columns=train_dataset.column_names,
 )
 
-# ================== НАСТРОЙКИ ПОД РЕЖИМ ==================
-
 if TRAIN_MODE == "safe":
     per_device_bs = 2
-    grad_acc_steps = 8          # эффективный batch ≈ 16
+    grad_acc_steps = 8
     num_epochs = 3
     use_gradient_checkpointing = True
-else:  # max_vram
-    per_device_bs = 6           # можно поджать до 5, если будет OOM
-    grad_acc_steps = 4          # эффективный batch ≈ 24
+else:
+    per_device_bs = 6
+    grad_acc_steps = 4
     num_epochs = 2
     use_gradient_checkpointing = False
 
-# Gradient checkpointing — только в safe-режиме
 if use_gradient_checkpointing:
     try:
         model.gradient_checkpointing_enable()
@@ -216,7 +175,6 @@ print(
     f"epochs={num_epochs}, grad_ckpt={use_gradient_checkpointing}"
 )
 
-# ================== ТРЕНИРОВКА ==================
 train_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     per_device_train_batch_size=per_device_bs,
@@ -224,14 +182,14 @@ train_args = TrainingArguments(
     num_train_epochs=num_epochs,
     learning_rate=2e-4,
     logging_steps=10,
-    fp16=True,                 # 3090 → fp16 ок
+    fp16=True,
     optim="paged_adamw_8bit",
     lr_scheduler_type="cosine",
     warmup_ratio=0.03,
     report_to="none",
-    overwrite_output_dir=True,    # учим LoRA "с нуля" в этой папке
+    overwrite_output_dir=True,
     gradient_checkpointing=use_gradient_checkpointing,
-    save_strategy="no",           # ❗ НЕ сохраняем промежуточные checkpoint-XXXX
+    save_strategy="no",
 )
 
 trainer = Trainer(
@@ -244,7 +202,7 @@ trainer = Trainer(
 if __name__ == "__main__":
     print(f"[{datetime.now().isoformat()}] 🚀 Старт обучения LoRA на челленджах (writer_challenges)...")
     trainer.train()
-    # Сохраняем только финальный вариант
+
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
     print(f"[{datetime.now().isoformat()}] ✅ Обучение LoRA завершено, финальный чекпоинт: {OUTPUT_DIR}")

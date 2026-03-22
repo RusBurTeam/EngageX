@@ -1,13 +1,4 @@
-# analytics/export_posts_writer_dataset.py
-# Экспорт SFT-датасета для LoRA-writer ТОЛЬКО из таблицы writer_challenges.
-#
-# writer_challenges — челленджи с полями week_goal, style, goal, topic_brief, final_challenge.
-# На выходе — JSONL с полем "messages" в формате:
-# [
-#   {"role": "system", "content": ...},
-#   {"role": "user", "content": ...},
-#   {"role": "assistant", "content": ...}
-# ]
+
 
 import os
 import sys
@@ -21,9 +12,6 @@ import asyncpg
 from dotenv import load_dotenv
 import pathlib
 
-# -------------------------------------------------------
-# База проекта и .env
-# -------------------------------------------------------
 BASE_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -37,10 +25,6 @@ DB = {
     "user": os.getenv("POSTGRES_USER", "engagex"),
     "password": os.getenv("POSTGRES_PASSWORD", "engagex"),
 }
-
-# -------------------------------------------------------
-# Промпты для writer-модели (обучающая разметка)
-# -------------------------------------------------------
 
 WRITER_SYSTEM_MSG = (
     "Ты — автор челленджей и коротких постов для Telegram-канала "
@@ -62,7 +46,6 @@ WRITER_USER_TEMPLATE = (
     "Напиши финальный текст челленджа для Telegram-канала."
 )
 
-
 def build_user_prompt(
     channel: Optional[str],
     goal: str,
@@ -70,14 +53,7 @@ def build_user_prompt(
     week_goal: Optional[str] = None,
     style: Optional[str] = None,
 ) -> str:
-    """
-    Собираем промпт для обучения:
-    - Канал
-    - Цель недели (если есть)
-    - Стиль (если есть)
-    - Цель челленджа
-    - Фактура (topic_brief)
-    """
+    """Build user prompt."""
     ch = channel or "не указан"
 
     wg = (week_goal or "").strip()
@@ -100,22 +76,12 @@ def build_user_prompt(
         brief=(brief or "").strip(),
     )
 
-
-# -------------------------------------------------------
-# Загрузка строк из writer_challenges (челленджи)
-# -------------------------------------------------------
-
 async def fetch_writer_challenges(
     conn: asyncpg.Connection,
     channel: Optional[str],
     limit: Optional[int],
 ) -> List[asyncpg.Record]:
-    """
-    Читает строки из writer_challenges, которые готовы для обучения:
-    - final_challenge не пустой,
-    - gen_status = 'ok',
-    - можно отфильтровать по каналу и по лимиту.
-    """
+    """Fetch writer challenges."""
     where_clauses = [
         "final_challenge IS NOT NULL",
         "trim(final_challenge) <> ''",
@@ -154,17 +120,11 @@ async def fetch_writer_challenges(
     rows = await conn.fetch(sql, *params)
     return rows
 
-
 async def count_writer_challenges_candidates(
     conn: asyncpg.Connection,
     channel: Optional[str],
 ) -> int:
-    """
-    Считает количество кандидатов в writer_challenges:
-    - final_challenge не пустой,
-    - ЛЮБОЙ gen_status,
-    - те же фильтры по channel.
-    """
+    """Count writer challenges candidates."""
     where_clauses = ["final_challenge IS NOT NULL", "trim(final_challenge) <> ''"]
     params: List[Any] = []
     idx = 1
@@ -185,11 +145,6 @@ async def count_writer_challenges_candidates(
     cnt = await conn.fetchval(sql, *params)
     return int(cnt or 0)
 
-
-# -------------------------------------------------------
-# Основная логика экспорта (ТОЛЬКО writer_challenges)
-# -------------------------------------------------------
-
 async def main():
     parser = argparse.ArgumentParser(
         description="Export SFT dataset for LoRA-writer ONLY from writer_challenges (fitness)."
@@ -198,7 +153,7 @@ async def main():
     parser.add_argument(
         "--out",
         type=str,
-        # дефолт матчит train-скрипт: train_lora_writer.py -> writer_train.jsonl
+
         default=os.path.join(BASE_DIR, "data", "writer_train.jsonl"),
         help="Путь к выходному JSONL (по умолчанию: ./data/writer_train.jsonl)",
     )
@@ -226,7 +181,7 @@ async def main():
     conn = await asyncpg.connect(**DB)
 
     try:
-        # ---------- CHALLENGES (writer_challenges) ----------
+
         print(
             f"[{datetime.now().isoformat()}] Загружаем из writer_challenges "
             f"(channel={args.channel})..."
@@ -322,7 +277,6 @@ async def main():
     finally:
         await conn.close()
         print(f"[{datetime.now().isoformat()}] Соединение с БД закрыто.")
-
 
 if __name__ == "__main__":
     asyncio.run(main())

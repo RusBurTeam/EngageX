@@ -9,15 +9,7 @@ from ..config import MODEL_SERVER_URL
 
 
 async def call_model(messages: List[Dict[str, str]]) -> str:
-    """
-    Универсальный клиент к MODEL_SERVER_URL.
-
-    Поддерживает:
-    1) OpenAI-стиль:
-       {"choices": [{"message": {"content": "..."}}]}
-    2) Простой формат:
-       {"text": "...", "mode": "..."}
-    """
+    """Call model."""
     async with aiohttp.ClientSession() as session:
         async with session.post(
             MODEL_SERVER_URL,

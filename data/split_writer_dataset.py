@@ -1,4 +1,4 @@
-# analytics/split_writer_dataset.py
+
 
 import os
 import sys
@@ -15,7 +15,7 @@ DATA_PATH = os.path.join(BASE_DIR, "data", "writer_train.jsonl")
 TRAIN_PATH = os.path.join(BASE_DIR, "data", "writer_rewrite_train.jsonl")
 VAL_PATH   = os.path.join(BASE_DIR, "data", "writer_rewrite_val.jsonl")
 
-SPLIT_RATIO = 0.8  # 80% train / 20% val
+SPLIT_RATIO = 0.8
 SEED = 42
 
 def main():

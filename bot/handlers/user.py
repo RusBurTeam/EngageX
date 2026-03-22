@@ -1,44 +1,34 @@
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Dict, Optional
 
-from aiogram import Router, F
-from aiogram.filters import CommandStart, Command, CommandObject
-from aiogram.types import Message, CallbackQuery
+from aiogram import F, Router
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import CallbackQuery, Message
 
-from ..db import save_challenge_answer, get_user_answers_for_user
-from ..services.challenges import get_challenge_by_id, generate_challenge_qa_answer
-from ..keyboards.user import user_main_kb, answer_kb, qa_kb
+from ..db import get_user_answers_for_user, save_challenge_answer
+from ..keyboards.user import answer_kb, qa_kb, user_main_kb
+from ..services.challenges import generate_challenge_qa_answer, get_challenge_by_id
 
 router = Router(name="user")
 
-# user_id -> challenge_id (режим ответа)
 _answer_state: Dict[int, int] = {}
-# user_id -> challenge_id (режим Q&A)
 _qa_state: Dict[int, int] = {}
 
 
 async def _show_user_home(target: Message | CallbackQuery) -> None:
-    """
-    Показ кабинета пользователя и сброс всех режимов.
-    """
-    if isinstance(target, CallbackQuery):
-        user_id = target.from_user.id
-    else:
-        user_id = target.from_user.id
-
+    """Show user dashboard and reset active modes."""
+    user_id = target.from_user.id
     _answer_state.pop(user_id, None)
     _qa_state.pop(user_id, None)
 
     text = (
-        "👤 <b>Твой кабинет</b>\n\n"
-        "Здесь можно:\n"
-        "• посмотреть историю своих ответов на челленджи;\n"
-        "• при необходимости обратиться в поддержку.\n\n"
-        "Чтобы ответить на конкретный челлендж — нажми кнопку "
-        "«Ответить» под постом в канале. Бот откроется сразу в режиме "
-        "ответа именно на этот пост."
+        "<b>Your Dashboard</b>\n\n"
+        "Here you can:\n"
+        "• review your recent challenge answers;\n"
+        "• open support information.\n\n"
+        "To answer a specific challenge, tap the button under the channel post. "
+        "The bot will open directly in answer mode for that challenge."
     )
 
     if isinstance(target, CallbackQuery):
@@ -50,73 +40,66 @@ async def _show_user_home(target: Message | CallbackQuery) -> None:
 
 @router.message(CommandStart())
 async def user_start(message: Message, command: CommandObject) -> None:
-    """
-    /start
-    /start ans_<id>
-    /start info_<id>
-    """
+    """Handle /start, /start ans_<id>, and /start info_<id>."""
     user_id = message.from_user.id
     payload: Optional[str] = command.args
 
-    # ----- /start ans_<id> -----
     if payload and payload.startswith("ans_"):
         try:
             ch_id = int(payload.split("_", maxsplit=1)[1])
         except Exception:
             await message.answer(
-                "Не удалось определить челлендж для ответа.\n"
-                "Попробуй ещё раз через кнопку «Ответить» под постом."
+                "Could not resolve the challenge for answer mode. "
+                "Please tap 'Submit Answer' under the post again."
             )
             return
 
         ch = await get_challenge_by_id(ch_id)
         if not ch:
-            await message.answer("Этот челлендж уже недоступен.")
+            await message.answer("This challenge is no longer available.")
             return
 
         _answer_state[user_id] = ch_id
         _qa_state.pop(user_id, None)
 
         await message.answer(
-            f"✅ Ты перешёл(а) к ответу на челлендж:\n\n"
-            f"📅 {ch['challenge_date'].isoformat()}\n"
-            f"💪 {ch['title']}\n\n"
+            f"You are now answering challenge:\n\n"
+            f"{ch['challenge_date'].isoformat()}\n"
+            f"{ch['title']}\n\n"
             f"{ch['body']}\n\n"
-            "✍️ Напиши свой ответ ОДНИМ сообщением.\n"
-            "Его увидят только админы сообщества.",
+            "Send your answer as a single message. "
+            "Only community admins can view it.",
             reply_markup=answer_kb(),
         )
         return
 
-    # ----- /start info_<id> -----
     if payload and payload.startswith("info_"):
         try:
             ch_id = int(payload.split("_", maxsplit=1)[1])
         except Exception:
             await message.answer(
-                "Не удалось определить челлендж для режима «Узнать больше».\n"
-                "Попробуй ещё раз через кнопку под постом."
+                "Could not resolve the challenge for info mode. "
+                "Please tap 'Learn More' under the post again."
             )
             return
 
         ch = await get_challenge_by_id(ch_id)
         if not ch:
-            await message.answer("Этот челлендж уже недоступен.")
+            await message.answer("This challenge is no longer available.")
             return
 
         _qa_state[user_id] = ch_id
         _answer_state.pop(user_id, None)
 
         await message.answer(
-            f"ℹ️ Подробности по челленджу «{ch['title']}»:\n\n"
+            f"Challenge details: {ch['title']}\n\n"
             f"{ch['body']}\n\n"
-            "Теперь ты можешь задать любой вопрос по этому челленджу — "
-            "просто напиши его текстом, и модель ответит.",
+            "You can now ask any question about this challenge. "
+            "Send your question as a normal message.",
             reply_markup=qa_kb(),
         )
         return
 
-    # обычный /start
     await _show_user_home(message)
 
 
@@ -133,13 +116,12 @@ async def cb_user_home(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "user_support")
 async def cb_user_support(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
-        "🆘 <b>Поддержка</b>\n\n"
-        "Если у тебя есть вопрос или техническая проблема, "
-        "напиши, пожалуйста, админу сообщества в личные сообщения.\n\n"
-        "В следующих версиях здесь появится полноценный интерфейс поддержки.",
+        "<b>Support</b>\n\n"
+        "If you have a question or a technical issue, "
+        "please contact your community admin directly.",
         reply_markup=user_main_kb(),
     )
-    await callback.answer("Раздел поддержки")
+    await callback.answer("Support")
 
 
 @router.callback_query(F.data == "user_cancel")
@@ -149,12 +131,11 @@ async def cb_user_cancel(callback: CallbackQuery) -> None:
     _qa_state.pop(user_id, None)
 
     await callback.message.edit_text(
-        "Режим ответа/вопросов сброшен.\n\n"
-        "Чтобы снова ответить на челлендж или задать вопрос по нему — "
-        "перейди по кнопке под постом в канале или открой свой кабинет.",
+        "Answer/Q&A mode has been reset.\n\n"
+        "To continue with a specific challenge, use the button under that channel post.",
         reply_markup=user_main_kb(),
     )
-    await callback.answer("Режим сброшен")
+    await callback.answer("Reset")
 
 
 @router.callback_query(F.data == "user_history")
@@ -164,22 +145,23 @@ async def cb_user_history(callback: CallbackQuery) -> None:
 
     if not rows:
         await callback.message.edit_text(
-            "У тебя пока нет сохранённых ответов на челленджи.",
+            "You do not have saved challenge answers yet.",
             reply_markup=user_main_kb(),
         )
         await callback.answer()
         return
 
-    lines = ["Твои последние ответы:\n"]
+    lines = ["Your latest answers:\n"]
     for r in rows:
         dt = r["created_at"]
         ch_date = r["challenge_date"]
         title = r["title"]
         answer_text = r["answer_text"]
+        preview = answer_text[:200] + ("..." if len(answer_text) > 200 else "")
         lines.append(
-            f"📅 {ch_date.isoformat()} · {dt.strftime('%Y-%m-%d %H:%M')}\n"
-            f"💪 {title}\n"
-            f"✍️ {answer_text[:200]}{'…' if len(answer_text) > 200 else ''}\n"
+            f"{ch_date.isoformat()} · {dt.strftime('%Y-%m-%d %H:%M')}\n"
+            f"{title}\n"
+            f"{preview}\n"
         )
 
     await callback.message.edit_text("\n".join(lines), reply_markup=user_main_kb())
@@ -193,41 +175,31 @@ async def handle_user_message(message: Message) -> None:
     if not text:
         return
 
-    # --- режим ответа ---
     if user_id in _answer_state:
         ch_id = _answer_state.pop(user_id)
-
         await save_challenge_answer(
             challenge_id=ch_id,
             tg_user_id=user_id,
             username=message.from_user.username,
             full_name=" ".join(
-                part
-                for part in [
-                    message.from_user.first_name,
-                    message.from_user.last_name,
-                ]
-                if part
+                part for part in [message.from_user.first_name, message.from_user.last_name] if part
             ),
             answer_text=text,
         )
 
         await message.answer(
-            "✅ Спасибо! Твой ответ сохранён.\n\n"
-            "Админы смогут посмотреть его в аналитике.",
+            "Thank you. Your answer has been saved and is now available to admins.",
             reply_markup=user_main_kb(),
         )
         return
 
-    # --- режим Q&A ---
     if user_id in _qa_state:
         ch_id = _qa_state[user_id]
         ch = await get_challenge_by_id(ch_id)
         if not ch:
             _qa_state.pop(user_id, None)
             await message.answer(
-                "Этот челлендж уже недоступен.\n"
-                "Дождись новых постов в канале и перейди по кнопке снова.",
+                "This challenge is no longer available. Please use a new challenge link.",
                 reply_markup=user_main_kb(),
             )
             return
@@ -236,24 +208,22 @@ async def handle_user_message(message: Message) -> None:
             model_answer = await generate_challenge_qa_answer(ch, text)
         except Exception:
             await message.answer(
-                "⚠️ Не получилось получить ответ модели.\n"
-                "Твой вопрос сохранён и будет виден админам.",
+                "Could not get a model response right now. Please try again shortly.",
                 reply_markup=qa_kb(),
             )
             return
 
         await message.answer(
-            f"❓ Твой вопрос по челленджу «{ch['title']}»:\n"
-            f"«{text}»\n\n"
-            f"🤖 Ответ модели:\n{model_answer}",
+            f"Your question about '{ch['title']}':\n"
+            f"{text}\n\n"
+            f"Model answer:\n{model_answer}",
             reply_markup=qa_kb(),
         )
         return
 
-    # --- нет активного режима ---
     await message.answer(
-        "Это бот с ежедневными челленджами.\n\n"
-        "Чтобы ответить на конкретный челлендж — нажми кнопку «Ответить» под постом в канале.\n"
-        "Чтобы открыть свой кабинет и посмотреть историю ответов, отправь /cabinet.",
+        "This bot is used for daily challenges.\n\n"
+        "To answer a specific challenge, tap the button under the channel post.\n"
+        "To open your dashboard and answer history, send /cabinet.",
         reply_markup=user_main_kb(),
     )

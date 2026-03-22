@@ -1,11 +1,4 @@
-# analytics/judge_quality_llm.py
-# Production-ready runner for post quality judging:
-# - atomic batch fetch (safe for concurrent workers)
-# - robust tokenization normalization and device placement
-# - JSON repair + secondary model-based extraction
-# - retries, attempts counting, fallback heuristic
-# - progress printing and simple GPU memory info
-# - records signals with raw_output, metrics, inference_time
+
 
 from __future__ import annotations
 import os
@@ -23,26 +16,21 @@ import asyncpg
 import torch
 from dotenv import load_dotenv
 
-# Project base
 import pathlib
 BASE_DIR = str(pathlib.Path(__file__).resolve().parents[1])
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-# Local model loader (assumed present)
 from Models.qwen_loader import load_tokenizer_model
 
-# optional transformers GenerationConfig
 try:
     from transformers import GenerationConfig, logging as transformers_logging
 except Exception:
     GenerationConfig = None
     transformers_logging = None
 
-# load env
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# configuration
 DB = {
     "host": os.getenv("POSTGRES_HOST", "127.0.0.1"),
     "port": int(os.getenv("POSTGRES_PORT", 5432)),
@@ -56,10 +44,8 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "qwen-local-v1")
 SAMPLE_MODE = os.getenv("SAMPLE_MODE", "0")
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "512"))
 
-# globals for model
 _tokenizer = None
 _model = None
-
 
 def ensure_model():
     global _tokenizer, _model
@@ -73,7 +59,6 @@ def ensure_model():
             device = params[0].device if params else torch.device("cpu")
         print(f"[{datetime.now().isoformat()}] Model loaded on device {device}")
 
-        # ensure pad token so tokenizer can build attention_mask if needed
         if getattr(_tokenizer, "pad_token_id", None) is None:
             try:
                 _tokenizer.add_special_tokens({"pad_token": "[PAD]"})
@@ -81,8 +66,6 @@ def ensure_model():
             except Exception as e:
                 warnings.warn(f"Could not add pad_token to tokenizer: {e}")
 
-
-# prompts
 SYSTEM_MSG = (
     "Ты — строгий, но простой модератор. "
     "Твоя ЕДИНСТВЕННАЯ задача — проверить, относится ли пост к тематике фитнеса, "
@@ -115,7 +98,6 @@ PROMPT_USER_TEMPLATE = (
     "Верни ТОЛЬКО JSON в указанном формате."
 )
 
-
 def build_messages(text: str, post_id: int, channel: str, metrics: Dict[str, Any]):
     m = PROMPT_USER_TEMPLATE.format(
         post_id=post_id,
@@ -132,8 +114,6 @@ def build_messages(text: str, post_id: int, channel: str, metrics: Dict[str, Any
         {"role": "user", "content": m},
     ]
 
-
-# ------------------- tokenization normalization -------------------
 def _normalize_input_bundle(input_bundle):
     if isinstance(input_bundle, torch.Tensor):
         return {"input_ids": input_bundle}
@@ -158,7 +138,6 @@ def _normalize_input_bundle(input_bundle):
         pass
     raise RuntimeError(f"Unsupported tokenizer return type: {type(input_bundle)}")
 
-
 def _to_device_and_prepare(input_dict, device):
     new = {}
     for k, v in input_dict.items():
@@ -175,7 +154,6 @@ def _to_device_and_prepare(input_dict, device):
         new["attention_mask"] = torch.ones_like(new["input_ids"], dtype=torch.long, device=device)
     return new
 
-
 def _supports_generation_config():
     try:
         sig = inspect.signature(_model.generate)
@@ -183,8 +161,6 @@ def _supports_generation_config():
     except Exception:
         return False
 
-
-# ------------------- JSON extract & repair -------------------
 def try_find_json_with_decoder(text: str):
     decoder = json.JSONDecoder()
     for m in re.finditer(r"\{", text):
@@ -196,13 +172,12 @@ def try_find_json_with_decoder(text: str):
             continue
     return None
 
-
 def repair_json_text(gen_text: str):
     s = gen_text
-    # remove fenced code blocks
+
     s = re.sub(r"```.*?```", " ", s, flags=re.S)
     s = s.replace("`", " ")
-    # smart quotes -> normal
+
     s = (
         s.replace("“", '"')
         .replace("”", '"')
@@ -210,13 +185,13 @@ def repair_json_text(gen_text: str):
         .replace("»", '"')
         .replace("’", "'")
     )
-    # remove control chars
+
     s = re.sub(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]", "", s)
-    # try to find JSON-like chunks
+
     for m in re.finditer(r"\{", s):
         start = m.start()
         chunk = s[start:]
-        # attempt to close at last brace
+
         last = chunk.rfind("}")
         if last != -1:
             candidate = chunk[: last + 1]
@@ -232,7 +207,6 @@ def repair_json_text(gen_text: str):
             continue
     return None
 
-
 def extract_or_recover_json(gen_text: str):
     parsed = try_find_json_with_decoder(gen_text)
     if parsed is not None:
@@ -242,8 +216,6 @@ def extract_or_recover_json(gen_text: str):
         return repaired
     return None
 
-
-# ------------------- fallback heuristic -------------------
 def heuristic_fallback_score(metrics: Dict[str, Any]) -> int:
     er = metrics.get("engagement_rate", 0.0)
     views = metrics.get("views", 0)
@@ -255,10 +227,8 @@ def heuristic_fallback_score(metrics: Dict[str, Any]) -> int:
         return 10
     return 35
 
-
-# ------------------- secondary extraction using model -------------------
 def extract_with_model(raw_output: str):
-    # secondary prompt: ask the model to return a JSON only
+
     prompt = [
         {
             "role": "system",
@@ -297,8 +267,6 @@ def extract_with_model(raw_output: str):
     except Exception:
         return None
 
-
-# ------------------- inference over items -------------------
 def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     items: [{'post_id':int,'channel':str,'text':str,'metrics':{...}}...]
@@ -320,7 +288,7 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         text = it["text"]
         channel = it["channel"]
         metrics = it.get("metrics", {})
-        # progress print
+
         now = time.time()
         avg = (now - last_time) if last_time else 0.0
         last_time = now
@@ -331,7 +299,7 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         )
 
         messages = build_messages(text, post_id, channel, metrics)
-        # tokenization
+
         try:
             inb = _tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, return_tensors="pt"
@@ -390,7 +358,6 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "eos_token_id": gen_kwargs["eos_token_id"],
             }
 
-        # generation
         t0 = time.time()
         try:
             with torch.inference_mode():
@@ -447,7 +414,6 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         t1 = time.time()
         inference_time = t1 - t0
 
-        # decode generated part
         try:
             out_ids = out[0] if not isinstance(out, list) else out[0]
             start = input_dict["input_ids"].shape[-1]
@@ -457,13 +423,12 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             warnings.warn(f"Decoding failed for post {post_id}: {e}")
             gen_text = ""
 
-        # extract JSON
         js = extract_or_recover_json(gen_text)
         raw_out = gen_text
         reason_tag = None
 
         if js is None:
-            # try secondary extraction with model itself
+
             js = extract_with_model(gen_text)
             if js is not None:
                 reason_tag = "recovered_by_model"
@@ -489,13 +454,11 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             )
             continue
 
-        # parse js fields
         try:
             is_good = bool(js.get("is_good", False))
             reasons = js.get("reasons", [])
             labels = js.get("labels", {})
 
-            # бинарный скор: только по факту «по теме / не по теме»
             score = 100.0 if is_good else 0.0
 
             entry_reasons = reasons[:6] if isinstance(reasons, list) else [str(reasons)]
@@ -536,8 +499,8 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             )
             continue
 
-    print()  # newline after progress line
-    # show GPU mem if available
+    print()
+
     try:
         if torch.cuda.is_available():
             d = _model.device
@@ -551,13 +514,8 @@ def infer_batch(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     return results
 
-
-# ------------------- DB helpers for atomic batches -------------------
 async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
-    """
-    Выбираем батч постов, для которых ещё нет записи в post_quality.
-    Защита от гонок — через FOR UPDATE SKIP LOCKED.
-    """
+    """Atomic fetch and mark."""
     rows = await conn.fetch(
         """
         SELECT p.id
@@ -591,7 +549,6 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
     """
     rows2 = await conn.fetch(fetch_sql, ids)
 
-    # aggregate reactions and comments for these ids
     reactions = {}
     rows_r = await conn.fetch(
         "SELECT post_id, SUM(reaction_count) AS reactions_sum "
@@ -634,9 +591,6 @@ async def atomic_fetch_and_mark(conn: asyncpg.Connection, batch: int, pid: int):
         )
     return result
 
-
-# UPSERT for results
-# ВАЖНО: есть колонка gen_status (VARCHAR(32)), которую код явно проставляет.
 UPSERT_SQL = """
 INSERT INTO post_quality (
     post_id,
@@ -656,15 +610,13 @@ SET quality_score = EXCLUDED.quality_score,
     updated_at    = now();
 """
 
-
-# ------------------- main loop -------------------
 async def main():
     print(f"[{datetime.now().isoformat()}] 🧑‍⚖️ LLM-оценка постов → post_quality")
     ensure_model()
 
     conn = await asyncpg.connect(**DB)
     try:
-        # сколько постов ещё не оценено
+
         total_planned = await conn.fetchval(
             """
             SELECT COUNT(*)
@@ -689,7 +641,7 @@ async def main():
                 items = await atomic_fetch_and_mark(conn, JUDGE_BATCH, pid)
 
             if not items:
-                # дополнительная проверка: вдруг пока работали, добавились посты
+
                 remaining = await conn.fetchval(
                     """
                     SELECT COUNT(*)
@@ -776,7 +728,6 @@ async def main():
 
     finally:
         await conn.close()
-
 
 if __name__ == "__main__":
     try:

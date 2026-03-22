@@ -1,14 +1,4 @@
-# analytics/autofill_writer_samples.py
-#
-# Автоматически заполняет writer_samples из хороших постов:
-# 1) Берёт посты с высоким quality_score из post_quality
-# 2) Просит локальную Qwen выделить goal / topic_brief / final_post
-# 3) Сохраняет в writer_samples с gen_status = 'ok' или 'error'
-#
-# Запуск:
-#   python -m analytics.autofill_writer_samples
-#   или
-#   python analytics/autofill_writer_samples.py
+
 
 from __future__ import annotations
 import os
@@ -24,14 +14,12 @@ import torch
 from dotenv import load_dotenv
 import pathlib
 
-# === Базовая настройка проекта ===
 BASE_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 load_dotenv(BASE_DIR / ".env")
 
-# Локальный загрузчик модели (как в judge_quality_llm)
 from Models.qwen_loader import load_tokenizer_model
 
 DB = {
@@ -42,13 +30,9 @@ DB = {
     "password": os.getenv("POSTGRES_PASSWORD", "engagex"),
 }
 
-# Порог качества поста, выше которого считаем его годным для датасета
 MIN_QUALITY_SCORE = float(os.getenv("WRITER_MIN_SCORE", "70"))
 
-# Ограничение на количество постов за один прогон
 MAX_POSTS = int(os.getenv("WRITER_MAX_POSTS", "10000000"))
-
-# === Промпт под разметку ===
 
 SYSTEM_MSG = (
     "Ты — методист и редактор, который готовит обучающие пары для модели-писателя.\n"
@@ -88,16 +72,11 @@ USER_TEMPLATE = (
     "с полями goal, topic_brief, final_post. Никакого текста до или после JSON."
 )
 
-# === Вспомогательные функции для работы с моделью ===
-
 _tokenizer: Any = None
 _model: Any = None
 
-
 def ensure_model():
-    """
-    Лениво загружаем токенайзер и модель один раз на процесс.
-    """
+    """Ensure model is available."""
     global _tokenizer, _model
     if _tokenizer is not None and _model is not None:
         return
@@ -113,14 +92,8 @@ def ensure_model():
 
     print(f"[{datetime.now().isoformat()}] Модель загружена на {device}")
 
-
-# === JSON-утилиты: устойчивый парсер ответа модели ===
-
 def _cut_first_json_block(text: str) -> str:
-    """
-    Вырезаем первый JSON-блок по балансу фигурных скобок.
-    Если нет закрывающей '}', берём текст от первой '{' до конца.
-    """
+    """Cut first json block."""
     start = text.find("{")
     if start == -1:
         return text
@@ -140,25 +113,16 @@ def _cut_first_json_block(text: str) -> str:
         return text[start:end]
     return text[start:]
 
-
 def _json_unescape_soft(s: str) -> str:
-    """
-    Аккуратно снимаем JSON-эскейпы через json.loads,
-    не ломая кириллицу и не используя unicode_escape.
-    """
+    """Json unescape soft."""
     try:
         wrapped = '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
         return json.loads(wrapped)
     except Exception:
         return s
 
-
 def _cut_final_post_tail(raw_tail: str) -> str:
-    """
-    У final_post JSON часто не закрывается кавычкой, а дальше идёт мусор
-    (китайский текст, ```json, user и т.п.). Берём хвост до первых
-    стоп-слов и чистим концовку от лишних кавычек/скобок/запятых.
-    """
+    """Cut final post tail."""
     stoppers = [
         "\nuser\n",
         "\nuser",
@@ -178,17 +142,13 @@ def _cut_final_post_tail(raw_tail: str) -> str:
 
     s = raw_tail[:end].rstrip()
 
-    # убираем возможные закрывающие `"`, `",`, `" }` и т.п.
     while s and s[-1] in '" ,}':
         s = s[:-1]
 
     return s.strip()
 
-
 def extract_json(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Устойчивая вытяжка JSON из ответа модели.
-    """
+    """Extract json."""
     if not text:
         return None
 
@@ -200,7 +160,6 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
 
     decoder = json.JSONDecoder()
 
-    # 1) Пытаемся как нормальный JSON
     for m in re.finditer(r"\{", text):
         start = m.start()
         try:
@@ -221,8 +180,6 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
         except Exception:
             continue
 
-    # 2) Фоллбек: goal и topic_brief — обычные JSON-строки,
-    # final_post — «сломанный» хвост после открывающей кавычки
     goal_match = re.search(r'"goal"\s*:\s*"(.*?)"', text, flags=re.S)
     brief_match = re.search(r'"topic_brief"\s*:\s*"(.*?)"', text, flags=re.S)
     final_match = re.search(r'"final_post"\s*:\s*"(.*)', text, flags=re.S)
@@ -247,7 +204,6 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
         "final_post": final_post,
     }
 
-
 def build_messages(channel: str, post_text: str) -> List[Dict[str, str]]:
     return [
         {"role": "system", "content": SYSTEM_MSG},
@@ -257,12 +213,8 @@ def build_messages(channel: str, post_text: str) -> List[Dict[str, str]]:
         },
     ]
 
-
 def run_inference(channel: str, post_text: str) -> Optional[Dict[str, Any]]:
-    """
-    Прогон одного поста через Qwen, попытка вытащить JSON.
-    Генерируем один раз.
-    """
+    """Run inference."""
     ensure_model()
 
     messages = build_messages(channel, post_text)
@@ -327,13 +279,8 @@ def run_inference(channel: str, post_text: str) -> Optional[Dict[str, Any]]:
         print("========== END RAW gen_text ==========\n")
     return js
 
-
-# === Украшение постов эмодзи / «стикерами» ===
-
 def add_emojis(channel: str, text: str) -> str:
-    """
-    Лёгкое украшение постов эмодзи.
-    """
+    """Add emojis."""
     if not text:
         return text
 
@@ -408,9 +355,6 @@ def add_emojis(channel: str, text: str) -> str:
 
     return text
 
-
-# === Работа с БД ===
-
 CREATE_WRITER_SAMPLES_SQL = """
 CREATE TABLE IF NOT EXISTS writer_samples (
     id SERIAL PRIMARY KEY,
@@ -465,24 +409,19 @@ INSERT INTO writer_samples (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7);
 """
 
-
 async def ensure_writer_samples_table(conn: asyncpg.Connection) -> None:
-    """
-    Гарантируем, что writer_samples существует и в ней есть gen_status.
-    """
+    """Ensure writer samples table is available."""
     await conn.execute(CREATE_WRITER_SAMPLES_SQL)
-    # На случай, если таблица создавалась старой версией без gen_status
+
     await conn.execute(
         "ALTER TABLE writer_samples "
         "ADD COLUMN IF NOT EXISTS gen_status VARCHAR(32) NOT NULL DEFAULT 'ok';"
     )
 
-
 async def fetch_candidates(conn) -> List[asyncpg.Record]:
     rows = await conn.fetch(SELECT_CANDIDATES_SQL, MIN_QUALITY_SCORE, MAX_POSTS)
     print(f"[{datetime.now().isoformat()}] Найдено кандидатов для разметки: {len(rows)}")
     return rows
-
 
 async def save_writer_sample(
     conn: asyncpg.Connection,
@@ -493,11 +432,7 @@ async def save_writer_sample(
     final_post: str,
     gen_status: str = "ok",
 ) -> None:
-    """
-    Сохраняем результат разметки. gen_status:
-    - 'ok'    — нормальный сэмпл
-    - 'error' — модель не смогла сгенерить адекватный JSON
-    """
+    """Save writer sample."""
     await conn.execute(
         INSERT_WRITER_SAMPLE_SQL,
         "post",
@@ -509,18 +444,11 @@ async def save_writer_sample(
         gen_status,
     )
 
-
 def print_progress(current: int, total: int) -> None:
-    """
-    Красивый прогресс-бар в консоли.
-
-    current — сколько постов уже обработано (успешно или помечено error),
-    total — общее количество кандидатов.
-    """
+    """Print progress."""
     if total <= 0:
         return
 
-    # выводим только иногда, чтобы не спамить
     if current != total and current % 50 != 0:
         return
 
@@ -534,9 +462,6 @@ def print_progress(current: int, total: int) -> None:
         f"|{bar}| {ratio * 100:5.1f}% ({current}/{total})",
         flush=True,
     )
-
-
-# === Основной цикл ===
 
 async def main():
     print(f"[{datetime.now().isoformat()}] 🚀 Авторазметка writer_samples стартует...")
@@ -562,7 +487,7 @@ async def main():
             ingest_status = r["ingest_status"]
 
             if ingest_status != "done":
-                # логически сюда почти не попадём из-за WHERE, но пусть будет
+
                 print(
                     f"[{datetime.now().isoformat()}] ⚠️ post_id={post_id} с ingest_status={ingest_status}, пропускаем без записи."
                 )
@@ -582,7 +507,7 @@ async def main():
 
             js = run_inference(channel, text)
             if not js:
-                # Сохраняем строку с gen_status='error', чтобы больше не трогать этот пост
+
                 await save_writer_sample(
                     conn,
                     post_id,
@@ -620,7 +545,6 @@ async def main():
                 print_progress(seen, total)
                 continue
 
-            # нормальный кейс
             final_post = add_emojis(channel, final_post)
 
             await save_writer_sample(
@@ -639,7 +563,7 @@ async def main():
 
             print_progress(seen, total)
 
-        print()  # перенос строки после прогресс-бара
+        print()
 
         print(
             f"[{datetime.now().isoformat()}] Готово. Успешно (ok): {processed_ok}, с ошибкой (error): {processed_error}"
@@ -648,7 +572,6 @@ async def main():
     finally:
         await conn.close()
         print(f"[{datetime.now().isoformat()}] 🔌 Соединение с БД закрыто.")
-
 
 if __name__ == "__main__":
     try:

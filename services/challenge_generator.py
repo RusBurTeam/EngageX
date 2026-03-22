@@ -1,42 +1,27 @@
-# bot/services/challenges.py
-#
-# Логика работы с челленджами:
-# - генерация через MODEL_SERVER_URL (LoRA writer)
-# - сохранение в БД
-# - выборка / статус / планирование
-# - защита от лишних генераций (служебные функции — для хэндлеров)
-
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 import asyncpg
 
-from ..config import MODEL_SERVER_URL
 from .. import db
+from ..config import MODEL_SERVER_URL
 from ..db import get_community_settings
 
-
-# ================== ВСПОМОГАТЕЛЬНЫЕ ШТУКИ ==================
-
-
 WEEK_GOALS = {
-    1: "Вовлечение: спровоцировать обсуждения, обмен опытом, активность в чате.",
-    2: "Удержание: закрепить привычку участвовать, возвращаться в чат каждый день.",
-    3: "Продажи / конверсия: мягко подвести к пробам продукта, апгрейдам, оплате.",
-    4: "Реактивация: вернуть тех, кто давно молчит, дать им лёгкий повод вернуться.",
+    1: "Engagement: spark discussion and active chat participation.",
+    2: "Retention: reinforce daily participation habits.",
+    3: "Conversion: guide users toward trying or purchasing the product.",
+    4: "Reactivation: bring back inactive community members.",
 }
 
 
 async def _model_generate(messages: List[Dict[str, str]]) -> str:
-    """
-    Вызов локального сервиса модели (Qwen + LoRA writer).
-    Ожидаем JSON-ответ формата { "text": "<сгенерированный текст>" }.
-    """
+    """Send generation request to the model server."""
     if not MODEL_SERVER_URL:
-        raise RuntimeError("MODEL_SERVER_URL не задан в .env")
+        raise RuntimeError("MODEL_SERVER_URL is not set in .env")
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
@@ -58,83 +43,66 @@ async def _model_generate(messages: List[Dict[str, str]]) -> str:
 
 
 def _parse_title_body(raw: str) -> Dict[str, str]:
-    """
-    Парсим ответ модели вида:
-
-    Заголовок: ...
-    Текст: ...
-
-    Если формат съехал — делаем максимально разумный разбор.
-    """
-    lines = [l.strip() for l in raw.splitlines() if l.strip()]
+    """Parse model output into title/body structure."""
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
     title = ""
     body_lines: List[str] = []
 
     for line in lines:
         low = line.lower()
-        if low.startswith("заголовок:"):
+        if low.startswith("title:"):
             title = line.split(":", 1)[1].strip()
-        elif low.startswith("текст:"):
-            # Всё, что после "Текст:" и ниже — считаем телом
+        elif low.startswith("text:"):
             body_lines.append(line.split(":", 1)[1].strip())
-        else:
-            if body_lines:
-                body_lines.append(line)
+        elif body_lines:
+            body_lines.append(line)
 
     if not title and lines:
         title = lines[0]
     if not body_lines and len(lines) > 1:
         body_lines = lines[1:]
 
-    body = "\n".join(body_lines).strip()
-    return {"title": title, "body": body}
+    return {"title": title or "Challenge", "body": "\n".join(body_lines).strip() or raw.strip()}
 
 
-async def _generate_single_challenge_for_date(
-    target_date: date,
-    week: int,
-) -> Dict[str, Any]:
-    """
-    Генерируем ОДИН челлендж на конкретную дату с учётом:
-    - тематики, тона, продукта (из community_settings)
-    - цели недели (1–4)
-    """
+async def _generate_single_challenge_for_date(target_date: date, week: int) -> Dict[str, Any]:
+    """Generate one challenge for a date and cycle week."""
     settings = await get_community_settings()
     topic = settings.get("topic") or "fitness"
-    tone = settings.get("tone") or "дружелюбный, мотивирующий"
+    tone = settings.get("tone") or "friendly, motivating"
     product = settings.get("product")
-    language = settings.get("language") or "ru"
+    language = settings.get("language") or "en"
 
     week_goal = WEEK_GOALS.get(week, WEEK_GOALS[1])
 
     system_msg = (
-        "Ты — ИИ-копирайтер, который придумывает фитнес-челленджи "
-        "для онлайн-сообщества. Челленджи должны быть короткими, живыми "
-        "и мотивирующими, без токсичности и морализаторства."
+        "You are an AI copywriter for a fitness community. "
+        "Create short, practical, motivating challenges without toxic tone or moralizing."
     )
 
     user_msg_lines = [
-        f"Тематика сообщества: {topic}",
-        f"Язык: {language}",
-        f"Тон общения: {tone}",
+        f"Community topic: {topic}",
+        f"Language: {language}",
+        f"Tone: {tone}",
         "",
-        f"Неделя цикла: {week}",
-        f"Цель недели: {week_goal}",
-        f"Дата челленджа: {target_date.isoformat()}",
+        f"Cycle week: {week}",
+        f"Weekly goal: {week_goal}",
+        f"Challenge date: {target_date.isoformat()}",
     ]
     if product:
-        user_msg_lines.append(f"Продукт / сервис: {product}")
+        user_msg_lines.append(f"Product/service: {product}")
+
     user_msg_lines.extend(
         [
             "",
-            "Сгенерируй один интерактивный челлендж для комьюнити, который:",
-            "- побуждает пользователя что-то СДЕЛАТЬ (написать, поделиться, выполнить маленькое действие);",
-            "- понятен и выполним за один день;",
-            "- связан с фитнесом, здоровьем, привычками.",
+            "Generate one interactive community challenge that:",
+            "- asks the user to perform a concrete action;",
+            "- can be completed in one day;",
+            "- stays relevant to fitness and healthy habits.",
             "",
-            "Ответ строго в формате:",
-            "Заголовок: <очень короткий, с эмодзи, без слова 'Челлендж'>",
-            "Текст: <2–5 предложений, без лишнего вступления>",
+            "Return strictly in format:",
+            "Title: <very short title>",
+            "Text: <2-5 concise sentences>",
         ]
     )
 
@@ -144,6 +112,7 @@ async def _generate_single_challenge_for_date(
             {"role": "user", "content": "\n".join(user_msg_lines)},
         ]
     )
+
     parsed = _parse_title_body(raw)
     return {
         "challenge_date": target_date,
@@ -152,48 +121,29 @@ async def _generate_single_challenge_for_date(
     }
 
 
-# ================== ГЕНЕРАЦИЯ ЧЕЛЛЕНДЖЕЙ ==================
-
-
 async def generate_challenges_for_today(week: int, count: int = 3) -> List[Dict[str, Any]]:
-    """
-    Генерация 1–N челленджей на сегодня.
-    """
+    """Generate multiple challenges for today."""
     today = date.today()
-    res: List[Dict[str, Any]] = []
+    result: List[Dict[str, Any]] = []
     for _ in range(count):
-        ch = await _generate_single_challenge_for_date(today, week)
-        res.append(ch)
-    return res
+        result.append(await _generate_single_challenge_for_date(today, week))
+    return result
 
 
-async def generate_challenges_for_week(
-    week: int,
-    start_date: Optional[date] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Генерируем по одному челленджу на каждый день недели (7 дней подряд).
-    По умолчанию старт — сегодня.
-    """
+async def generate_challenges_for_week(week: int, start_date: Optional[date] = None) -> List[Dict[str, Any]]:
+    """Generate seven challenges starting from start_date."""
     if start_date is None:
         start_date = date.today()
 
-    res: List[Dict[str, Any]] = []
+    result: List[Dict[str, Any]] = []
     for i in range(7):
-        d = start_date + timedelta(days=i)
-        ch = await _generate_single_challenge_for_date(d, week)
-        res.append(ch)
-    return res
-
-
-# ================== РАБОТА С ТАБЛИЦЕЙ challenges ==================
+        target = start_date + timedelta(days=i)
+        result.append(await _generate_single_challenge_for_date(target, week))
+    return result
 
 
 async def save_generated_challenges(challenges: List[Dict[str, Any]], week: int) -> None:
-    """
-    Сохраняем сгенерированные челленджи в таблицу challenges
-    со статусом 'generated'.
-    """
+    """Persist generated challenges into DB."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 
@@ -203,25 +153,16 @@ async def save_generated_challenges(challenges: List[Dict[str, Any]], week: int)
         VALUES ($1, $2, $3, $4, 'generated', NOW())
         """
         for ch in challenges:
-            await conn.execute(
-                stmt,
-                ch["challenge_date"],
-                week,
-                ch["title"],
-                ch["body"],
-            )
+            await conn.execute(stmt, ch["challenge_date"], week, ch["title"], ch["body"])
 
 
 async def get_last_generated_challenges(limit: int = 10) -> List[asyncpg.Record]:
-    """
-    Последние НЕОТПРАВЛЕННЫЕ челленджи (любой статус, кроме 'sent'),
-    отсортированные по дате и id.
-    """
+    """Return latest unsent challenges."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch(
+        return await conn.fetch(
             """
             SELECT id, challenge_date, title, body, status, week, created_at
             FROM challenges
@@ -231,7 +172,6 @@ async def get_last_generated_challenges(limit: int = 10) -> List[asyncpg.Record]
             """,
             limit,
         )
-        return rows
 
 
 async def get_challenge_by_id(ch_id: int) -> Optional[asyncpg.Record]:
@@ -239,7 +179,7 @@ async def get_challenge_by_id(ch_id: int) -> Optional[asyncpg.Record]:
         raise RuntimeError("DB pool is not initialized")
 
     async with db.pool.acquire() as conn:
-        row = await conn.fetchrow(
+        return await conn.fetchrow(
             """
             SELECT id, challenge_date, title, body, status, week, created_at, sent_at
             FROM challenges
@@ -247,43 +187,29 @@ async def get_challenge_by_id(ch_id: int) -> Optional[asyncpg.Record]:
             """,
             ch_id,
         )
-        return row
 
 
 async def update_challenge_status(ch_id: int, status: str) -> None:
-    """
-    Обновляем статус челленджа (generated / scheduled / disabled / sent).
-    """
+    """Update challenge status."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 
     async with db.pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE challenges SET status = $1 WHERE id = $2",
-            status,
-            ch_id,
-        )
+        await conn.execute("UPDATE challenges SET status = $1 WHERE id = $2", status, ch_id)
 
 
 async def schedule_challenge(ch_id: int) -> None:
-    """
-    Делаем челлендж единственным 'scheduled' на свою дату.
-    Остальные на эту же дату опускаем до 'generated'.
-    """
+    """Set one challenge as scheduled and unschedule peers on same date."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 
     async with db.pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT challenge_date FROM challenges WHERE id = $1",
-            ch_id,
-        )
+        row = await conn.fetchrow("SELECT challenge_date FROM challenges WHERE id = $1", ch_id)
         if not row:
             return
-        ch_date: date = row["challenge_date"]
+        challenge_date: date = row["challenge_date"]
 
         async with conn.transaction():
-            # Всё, что уже было scheduled на эту дату, переводим в generated
             await conn.execute(
                 """
                 UPDATE challenges
@@ -292,10 +218,10 @@ async def schedule_challenge(ch_id: int) -> None:
                   AND status = 'scheduled'
                   AND id <> $2
                 """,
-                ch_date,
+                challenge_date,
                 ch_id,
             )
-            # Делает выбранный челлендж scheduled
+
             await conn.execute(
                 """
                 UPDATE challenges
@@ -307,10 +233,7 @@ async def schedule_challenge(ch_id: int) -> None:
 
 
 async def mark_challenge_sent(ch_id: int) -> None:
-    """
-    Помечаем челлендж отправленным.
-    ВАЖНО: мы никогда его не удаляем.
-    """
+    """Mark challenge as sent."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 
@@ -327,10 +250,7 @@ async def mark_challenge_sent(ch_id: int) -> None:
 
 
 async def get_active_challenges_grouped() -> Dict[date, List[asyncpg.Record]]:
-    """
-    Активные челленджи (generated / scheduled), БЕЗ sent.
-    Группировка по дате.
-    """
+    """Return generated/scheduled challenges grouped by date."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 
@@ -345,21 +265,13 @@ async def get_active_challenges_grouped() -> Dict[date, List[asyncpg.Record]]:
         )
 
     grouped: Dict[date, List[asyncpg.Record]] = {}
-    for r in rows:
-        d: date = r["challenge_date"]
-        grouped.setdefault(d, []).append(r)
+    for row in rows:
+        grouped.setdefault(row["challenge_date"], []).append(row)
     return grouped
 
 
-# ================== ЗАЩИТА ОТ ЛИШНИХ ГЕНЕРАЦИЙ ==================
-
-
 async def count_active_challenges_between(start: date, end: date) -> int:
-    """
-    Считаем количество АКТИВНЫХ челленджей (generated / scheduled)
-    в диапазоне дат [start; end].
-    Отправленные (sent) не считаем.
-    """
+    """Count generated/scheduled challenges in date range."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 
@@ -378,10 +290,7 @@ async def count_active_challenges_between(start: date, end: date) -> int:
 
 
 async def delete_unsent_challenges_between(start: date, end: date) -> None:
-    """
-    Удаляем ВСЕ НЕОТПРАВЛЕННЫЕ челленджи в диапазоне дат.
-    ВАЖНО: status = 'sent' НЕ ТРОГАЕМ НИКОГДА.
-    """
+    """Delete non-sent challenges in date range."""
     if db.pool is None:
         raise RuntimeError("DB pool is not initialized")
 

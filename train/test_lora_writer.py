@@ -1,5 +1,4 @@
-# train/test_lora_writer.py
-# Тест локальной LoRA-писателя на Qwen2.5-7B-Instruct
+
 
 import os
 import sys
@@ -12,14 +11,12 @@ from peft import PeftModel
 from dotenv import load_dotenv
 import pathlib
 
-# ================== БАЗОВЫЕ ПУТИ ==================
 BASE_DIR = str(pathlib.Path(__file__).resolve().parents[1])
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
-# ======== ПУТИ К МОДЕЛИ И ЛОРЕ ========
 DEFAULT_LOCAL_QWEN = os.path.join(BASE_DIR, "Models", "qwen2.5-7b-instruct")
 BASE_MODEL = os.getenv("QWEN_LOCAL_PATH", DEFAULT_LOCAL_QWEN)
 
@@ -37,8 +34,6 @@ if not os.path.isdir(BASE_MODEL):
 if not os.path.isdir(LORA_DIR):
     raise FileNotFoundError(f"Папка с LoRA-чекпоинтом не найдена: {LORA_DIR}")
 
-# ================== ПРОМПТЫ, КАК В ДАТАСЕТЕ ==================
-
 WRITER_SYSTEM_MSG = (
     "Ты — автор постов для Telegram-канала по крипте и IT. "
     "Пишешь ясно, по-деловому, без воды и кликбейта. "
@@ -54,7 +49,6 @@ WRITER_USER_TEMPLATE = (
     "Напиши финальный пост для Telegram-канала."
 )
 
-
 def build_messages(channel: str, goal: str, brief: str) -> List[Dict[str, str]]:
     user_content = WRITER_USER_TEMPLATE.format(
         channel=channel or "не указан",
@@ -65,9 +59,6 @@ def build_messages(channel: str, goal: str, brief: str) -> List[Dict[str, str]]:
         {"role": "system", "content": WRITER_SYSTEM_MSG},
         {"role": "user", "content": user_content},
     ]
-
-
-# ================== ЗАГРУЗКА МОДЕЛИ + LORA ==================
 
 def load_lora_model():
     print(f"[{datetime.now().isoformat()}] 🔄 Загружаем токенайзер...")
@@ -109,7 +100,6 @@ def load_lora_model():
     print(f"[{datetime.now().isoformat()}] ✅ Модель с LoRA загружена на {device}")
     return tokenizer, model, device
 
-
 def generate_post(
     tokenizer,
     model,
@@ -121,11 +111,10 @@ def generate_post(
 ) -> str:
     messages = build_messages(channel, goal, brief)
 
-    # Собираем input через chat template Qwen
     prompt_text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
-        add_generation_prompt=True,  # просим модель продолжить ответ ассистента
+        add_generation_prompt=True,
     )
 
     inputs = tokenizer(
@@ -146,15 +135,11 @@ def generate_post(
     gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     return gen_text.strip()
 
-
 if __name__ == "__main__":
     print(f"[{datetime.now().isoformat()}] 🧪 Тест LoRA-писателя...")
 
     tokenizer, model, device = load_lora_model()
 
-    # ==== ТЕСТОВЫЙ ПРИМЕР ====
-    # ==== ТЕСТОВЫЙ ПРИМЕР: Челлендж, Неделя 1 — Вовлечение ====
-    # ==== ТЕСТОВЫЙ ПРИМЕР: продуктовый челлендж, Неделя 3 — Продажи / Конверсия ====
     test_channel = "taskflow_saas_ru"
     test_goal = (
         "Сделать мягкий продуктовый челлендж для Недели 3 (Продажи / Конверсия): "

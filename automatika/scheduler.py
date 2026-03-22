@@ -1,61 +1,61 @@
-import schedule
+﻿import os
 import subprocess
 import time
-import os
 from datetime import datetime
-import sys
 
-# === Базовая директория проекта ===
+import schedule
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-os.chdir(BASE_DIR)  # чтобы все пути были из корня
+os.chdir(BASE_DIR)
 
-# === Логирование ===
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-def log(message: str):
+
+def log(message: str) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_path = os.path.join(LOG_DIR, f"{datetime.now().strftime('%Y-%m-%d')}.log")
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(f"[{now}] {message}\n")
     print(message)
 
-# === Задачи ===
-def run_parser():
-    log("🚀 Запуск парсера Telegram...")
+
+def run_parser() -> None:
+    log("[start] Running Telegram parser...")
     try:
         subprocess.run(["python", "parser/parser.py"], check=True)
-        log("✅ Парсер успешно завершён.")
-    except subprocess.CalledProcessError as e:
-        log(f"❌ Ошибка парсера: {e}")
+        log("[ok] Telegram parser completed")
+    except subprocess.CalledProcessError as exc:
+        log(f"[error] Telegram parser failed: {exc}")
 
-def run_analytics():
-    log("📊 Запуск аналитики вовлечённости...")
+
+def run_analytics() -> None:
+    log("[start] Running engagement analytics...")
     try:
         subprocess.run(["python", "analytics/analyze_engagement.py"], check=True)
-        log("✅ Аналитика успешно завершена.")
-    except subprocess.CalledProcessError as e:
-        log(f"❌ Ошибка аналитики: {e}")
+        log("[ok] Analytics completed")
+    except subprocess.CalledProcessError as exc:
+        log(f"[error] Analytics failed: {exc}")
 
-def run_dataset_builder():
-    log("📦 Запуск сборки датасета...")
+
+def run_dataset_builder() -> None:
+    log("[start] Building dataset...")
     try:
         subprocess.run(["python", "analytics/dataset_builder.py"], check=True)
-        log("✅ Датасет успешно собран.")
-    except subprocess.CalledProcessError as e:
-        log(f"❌ Ошибка сборки датасета: {e}")
+        log("[ok] Dataset build completed")
+    except subprocess.CalledProcessError as exc:
+        log(f"[error] Dataset build failed: {exc}")
 
-# === Расписание ===
+
 schedule.every().day.at("03:00").do(run_parser)
 schedule.every().day.at("03:30").do(run_analytics)
 schedule.every().day.at("04:00").do(run_dataset_builder)
 
-log("🕒 Автоматический планировщик EngageX запущен.")
-log("   03:00 — парсер")
-log("   03:30 — аналитика")
-log("   04:00 — сборка датасета")
+log("[start] EngageX scheduler started")
+log("  03:00 - parser")
+log("  03:30 - analytics")
+log("  04:00 - dataset builder")
 
-# === Основной цикл ===
 while True:
     schedule.run_pending()
     time.sleep(60)
